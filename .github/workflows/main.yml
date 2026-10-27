@@ -64,26 +64,27 @@ jobs:
       - name: Setup Windows account and RDP
         shell: powershell
         run: |
-          # Bao bọc mọi thứ trong try/catch để không bao giờ văng lỗi đỏ
           try {
-              # 1. Tắt chính sách mật khẩu phức tạp
+              Write-Host "Disabling password complexity policy..."
               $seceditFile = "$env:TEMP\secpol.inf"
-              @"
-              [Unicode]
-              Unicode=yes
-              [System Access]
-              PasswordComplexity = 0
-              MinimumPasswordLength = 0
-              "@ | Out-File -FilePath $seceditFile -Encoding Unicode
+              
+              # Sử dụng mảng String để tránh lỗi khoảng trắng của Here-String
+              $seceditContent = @(
+                  "[Unicode]",
+                  "Unicode=yes",
+                  "[System Access]",
+                  "PasswordComplexity = 0",
+                  "MinimumPasswordLength = 0"
+              )
+              Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
+              
               $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
               Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
               
-              # 2. Bật RDP
               Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction SilentlyContinue
               Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -ErrorAction SilentlyContinue
               Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
 
-              # 3. Tạo User
               $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
               $user = Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue
               if ($null -eq $user) {
@@ -92,11 +93,9 @@ jobs:
                 Set-LocalUser -Name $env:RDP_USERNAME -Password $secure -ErrorAction SilentlyContinue
               }
               
-              # 4. Phân quyền
               Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
               Add-LocalGroupMember -Group 'Administrators' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
               
-              # 5. Bật Service RDP
               Set-Service -Name TermService -StartupType Automatic -ErrorAction SilentlyContinue
               Start-Service -Name TermService -ErrorAction SilentlyContinue
               
@@ -104,7 +103,6 @@ jobs:
           } catch {
               Write-Host "Warning during setup: $_"
           }
-          # Ép buộc exit 0 để GitHub Actions không báo lỗi đỏ
           exit 0
 
       - name: Setup Bore Tunnel for RDP
