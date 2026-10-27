@@ -180,56 +180,207 @@ jobs:
       - name: Install and configure RustDesk
         shell: pwsh
         env:
+          WORK_DIR: ${{ env.WORK_DIR }}
+          TEMP_DIR: ${{ env.TEMP_DIR }}
           SECRET_RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest' -Headers @{ 'User-Agent'='Layer7-Workflow' } -TimeoutSec 60
-          $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[0-9.]+-x86_64\.exe$' } | Select-Object -First 1
-          if (-not $asset) { $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[0-9.]+-x86_64\.msi$' } | Select-Object -First 1 }
-          if (-not $asset) { throw 'Could not find a Windows x86_64 RustDesk installer in the latest release.' }
+
+          if ([string]::IsNullOrWhiteSpace($env:SECRET_RDP_PASSWORD)) {
+            throw 'Missing GitHub Actions secret: RDP_PASSWORD.'
+          }
+
+          New-Item -ItemType Directory -Force -Path $env:TEMP_DIR, $env:WORK_DIR | Out-Null
+
+          # Get the latest official RustDesk release.
+          $headers = @{ 'User-Agent' = 'Layer7-Workflow' }
+          $release = Invoke-RestMethod `
+            -Uri 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest' `
+            -Headers $headers `
+            -TimeoutSec 60
+
+          # Prefer MSI for silent Windows installation.
+          $asset = $release.assets |
+            Where-Object { $_.name -match '^rustdesk-[0-9.]+-x86_64\.msi$' } |
+            Select-Object -First 1
+
+          if (-not $asset) {
+            $asset = $release.assets |
+              Where-Object { $_.name -match '^rustdesk-[0-9.]+-x86_64\.exe$' } |
+              Select-Object -First 1
+          }
+
+          if (-not $asset) {
+            throw "No supported Windows x64 installer found in RustDesk release $($release.tag_name)."
+          }
+
           $installer = Join-Path $env:TEMP_DIR $asset.name
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installer -TimeoutSec 300
-          if ((Get-Item $installer).Length -lt 1MB) { throw 'RustDesk installer is unexpectedly small.' }
-          if ($installer -match '\.msi$') {
-            $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', "`"$installer`"", '/quiet', '/norestart') -Wait -PassThru -NoNewWindow
-          } else {
-            $proc = Start-Process -FilePath $installer -ArgumentList '--silent-install' -Wait -PassThru -NoNewWindow
+
+          Write-Host "Downloading RustDesk $($release.tag_name)..."
+          Invoke-WebRequest `
+            -Uri $asset.browser_download_url `
+            -OutFile $installer `
+            -TimeoutSec 300
+
+          if (-not (Test-Path $installer) -or (Get-Item $installer).Length -lt 1MB) {
+            throw 'RustDesk installer download is invalid or incomplete.'
           }
-          if ($proc.ExitCode -ne 0) { throw "RustDesk installer failed with exit code $($proc.ExitCode)." }
-          $rustdeskExe = Join-Path $env:ProgramFiles 'RustDesk\rustdesk.exe'
-          if (-not (Test-Path $rustdeskExe)) {
-            $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ -and (Test-Path $_) }
-            $found = Get-ChildItem -Path $roots -Filter 'rustdesk.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) { $rustdeskExe = $found.FullName }
+
+          # Install silently and check the actual exit code.
+          if ($installer.EndsWith('.msi', [StringComparison]::OrdinalIgnoreCase)) {
+            $proc = Start-Process `
+              -FilePath 'msiexec.exe' `
+              -ArgumentList @('/i', "`"$installer`"", '/qn', '/norestart') `
+              -Wait -PassThru -NoNewWindow
           }
-          if (-not (Test-Path $rustdeskExe)) { throw 'rustdesk.exe was not found after installation.' }
-          $service = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-          if (-not $service) { & $rustdeskExe --install-service 2>&1 | ForEach-Object { Write-Host $_ } }
-          Start-Sleep -Seconds 3
-          Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
-          Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-          # The password is intentionally never echoed or added to the job Summary.
-          & $rustdeskExe --password "$env:SECRET_RDP_PASSWORD" 2>&1 | ForEach-Object { Write-Host $_ }
-          Start-Sleep -Seconds 3
-          $rustdeskId = $null
-          for ($i = 0; $i -lt 12; $i++) {
-            $output = & $rustdeskExe --get-id 2>$null
-            if ($output) {
-              $candidate = ($output | Select-Object -First 1).ToString().Trim()
-              if ($candidate -match '^\d+$') { $rustdeskId = $candidate; break }
+          else {
+            $proc = Start-Process `
+              -FilePath $installer `
+              -ArgumentList '--silent-install' `
+              -Wait -PassThru -NoNewWindow
+          }
+
+          if ($proc.ExitCode -notin @(0, 3010, 1641)) {
+            throw "RustDesk installer failed with exit code $($proc.ExitCode)."
+          }
+
+          # Locate the installed executable.
+          $candidatePaths = @(
+            (Join-Path $env:ProgramFiles 'RustDesk\rustdesk.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'RustDesk\rustdesk.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs\RustDesk\rustdesk.exe'),
+            (Join-Path $env:LOCALAPPDATA 'RustDesk\rustdesk.exe')
+          ) | Where-Object { $_ }
+
+          $rustdeskExe = $candidatePaths |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          if (-not $rustdeskExe) {
+            $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+              Where-Object { $_ -and (Test-Path $_) }
+
+            foreach ($root in $roots) {
+              $found = Get-ChildItem `
+                -Path $root `
+                -Filter 'rustdesk.exe' `
+                -File -Recurse `
+                -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+
+              if ($found) {
+                $rustdeskExe = $found.FullName
+                break
+              }
             }
+          }
+
+          if (-not $rustdeskExe) {
+            throw 'RustDesk installation finished, but rustdesk.exe could not be located.'
+          }
+
+          Write-Host "RustDesk executable found: $rustdeskExe"
+
+          # Ensure the RustDesk service is installed and running.
+          $service = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+
+          if (-not $service) {
+            $serviceOutput = & $rustdeskExe --install-service 2>&1
+            $serviceExitCode = $LASTEXITCODE
+
+            $serviceOutput | ForEach-Object { Write-Host "$_" }
+
+            if ($serviceExitCode -ne 0) {
+              throw "RustDesk service installation failed with exit code $serviceExitCode."
+            }
+          }
+
+          Start-Sleep -Seconds 3
+
+          $service = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+
+          if (-not $service) {
+            throw 'RustDesk service was not registered.'
+          }
+
+          Set-Service -Name 'RustDesk' -StartupType Automatic
+          Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
+
+          $service = Get-Service -Name 'RustDesk'
+
+          if ($service.Status -ne 'Running') {
+            throw "RustDesk service is not running. Current status: $($service.Status)"
+          }
+
+          # Set the permanent password without exposing it in logs.
+          $passwordOutput = & $rustdeskExe --password $env:SECRET_RDP_PASSWORD 2>&1
+          $passwordExitCode = $LASTEXITCODE
+
+          # Do not print password command output.
+          $passwordText = ($passwordOutput | Out-String)
+
+          if ($passwordExitCode -ne 0 -or $passwordText -match 'Settings are disabled|Changing permanent password is disabled|Installation and administrative privileges required') {
+            throw 'RustDesk rejected the password configuration. Check service installation and permissions.'
+          }
+
+          if ($passwordText -notmatch 'Done!') {
+            Write-Host 'RustDesk password command returned without explicit confirmation; continuing with ID verification.'
+          }
+
+          # Read the ID from all output lines, not just the first line.
+          $rustdeskId = $null
+
+          for ($i = 0; $i -lt 15; $i++) {
+            $idOutput = & $rustdeskExe --get-id 2>&1
+
+            foreach ($line in $idOutput) {
+              $text = "$line".Trim()
+
+              if ($text -match '^\d{6,20}$') {
+                $rustdeskId = $text
+                break
+              }
+            }
+
+            if ($rustdeskId) {
+              break
+            }
+
             Start-Sleep -Seconds 3
           }
-          if (-not $rustdeskId) { throw 'RustDesk was installed but a valid RustDesk ID could not be read.' }
-          $rustdeskId | Out-File -FilePath (Join-Path $env:WORK_DIR 'rustdesk_id.txt') -Encoding ascii -NoNewline
+
+          if (-not $rustdeskId) {
+            throw 'RustDesk is installed and running, but a numeric RustDesk ID could not be retrieved.'
+          }
+
+          $idFile = Join-Path $env:WORK_DIR 'rustdesk_id.txt'
+          $rustdeskId | Out-File -FilePath $idFile -Encoding ascii -NoNewline
+
+          # Configure firewall rules for direct RustDesk connections.
           Remove-NetFirewallRule -DisplayName 'Layer7-RustDesk-TCP' -ErrorAction SilentlyContinue
           Remove-NetFirewallRule -DisplayName 'Layer7-RustDesk-UDP' -ErrorAction SilentlyContinue
-          New-NetFirewallRule -DisplayName 'Layer7-RustDesk-TCP' -Direction Inbound -Protocol TCP -LocalPort 21115-21119 -Action Allow -Profile Any | Out-Null
-          New-NetFirewallRule -DisplayName 'Layer7-RustDesk-UDP' -Direction Inbound -Protocol UDP -LocalPort 21116 -Action Allow -Profile Any | Out-Null
-          Write-Host "RustDesk is configured. RustDesk ID: $rustdeskId"
-          "RustDesk ID: $rustdeskId" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          'The connection password is the repository secret RDP_PASSWORD; it is intentionally not displayed here.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
+          New-NetFirewallRule `
+            -DisplayName 'Layer7-RustDesk-TCP' `
+            -Direction Inbound -Protocol TCP `
+            -LocalPort 21115-21119 `
+            -Action Allow -Profile Any | Out-Null
+
+          New-NetFirewallRule `
+            -DisplayName 'Layer7-RustDesk-UDP' `
+            -Direction Inbound -Protocol UDP `
+            -LocalPort 21116 `
+            -Action Allow -Profile Any | Out-Null
+
+          # Only publish the ID, never the password.
+          Write-Host "RustDesk configured successfully. ID: $rustdeskId"
+
+          "RustDesk ID: $rustdeskId" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+          'Password: configured from repository secret RDP_PASSWORD; value hidden.' |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
       # 5. Mesa3D is REQUIRED. Do not make this optional and do not remove $env:MESA_DIR in cleanup.
       # The extracted package is retained for the entire runner session at C:\Layer7\mesa3d.
       - name: Download, extract and validate Mesa3D package (REQUIRED)
