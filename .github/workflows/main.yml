@@ -166,12 +166,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Write-Host "::add-mask::$env:SECRET_RDP_PASSWORD"
 
-          # 1. Khởi tạo thư mục
           foreach ($d in @($env:WORK_DIR, $env:PERSIST_DIR, $env:TEMP_DIR)) {
               if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
           }
 
-          # 2. Setup RDP fallback
           $user = $env:RDP_USER
           $pass = $env:SECRET_RDP_PASSWORD
 
@@ -215,9 +213,10 @@ jobs:
           Write-Host "--- Fetching latest RustDesk release ---"
           $releaseApi = 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest'
           $release = Invoke-RestMethod -Uri $releaseApi -Headers @{ 'User-Agent' = 'Layer7-Workflow' } -TimeoutSec 60
-          $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[\d\.]+-x86_64\.exe$' } | Select-Object -First 1
+          
+          $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[\d\.]+-x86_64\.msi$' } | Select-Object -First 1
           if (-not $asset) {
-              $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[\d\.]+-x86_64\.msi$' } | Select-Object -First 1
+              $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[\d\.]+-x86_64\.exe$' } | Select-Object -First 1
           }
           if (-not $asset) { throw "Could not find RustDesk Windows x86_64 asset." }
 
@@ -246,31 +245,58 @@ jobs:
           if (-not (Test-Path $rustdeskExe)) { throw "rustdesk.exe not found." }
           Write-Host "RustDesk executable found at: $rustdeskExe"
 
-          Write-Host "Configuring RustDesk Service..."
-          $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+          # --- Phương pháp mới: Cấu hình qua file TOML thay vì CLI (tránh treo) ---
+          Write-Host "Configuring RustDesk via config file..."
+          
+          $svcName = 'RustDesk'
+          $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
           if ($svc) {
-              if ($svc.Status -ne 'Running') { Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue }
-              Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
-          } else {
-              & $rustdeskExe --install-service 2>&1 | ForEach-Object { Write-Host $_ }
-              Start-Sleep -Seconds 3
-              Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+              Write-Host "Stopping RustDesk service..."
+              Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
           }
 
-          Write-Host "Setting RustDesk password..."
-          & $rustdeskExe --password "$env:SECRET_RDP_PASSWORD" 2>&1 | Out-Null
-          Start-Sleep -Seconds 3
+          $configDir = "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config"
+          if (-not (Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force | Out-Null }
+          
+          $tomlPath = Join-Path $configDir 'RustDesk.toml'
+          $tomlContent = @"
+id = ''
+password = '$env:SECRET_RDP_PASSWORD'
+salt = ''
+"@
+          $tomlContent | Out-File -FilePath $tomlPath -Encoding UTF8 -Force
+          Write-Host "RustDesk.toml has been written with the permanent password."
+
+          if (-not $svc) {
+              Write-Host "Installing RustDesk service..."
+              & $rustdeskExe --install-service 2>&1 | Out-Null
+              Start-Sleep -Seconds 5
+          }
+          Write-Host "Starting RustDesk service..."
+          Set-Service -Name $svcName -StartupType Automatic -ErrorAction SilentlyContinue
+          Start-Service -Name $svcName -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
 
           Write-Host "Retrieving RustDesk ID..."
           $rustdeskId = $null
-          for ($i = 0; $i -lt 15; $i++) {
-              $idOutput = & $rustdeskExe --get-id 2>$null
-              Write-Host "Attempt $($i+1): ID output = $idOutput"
+          for ($i = 0; $i -lt 10; $i++) {
+              if (Test-Path $tomlPath) {
+                  $idMatch = Select-String -Path $tomlPath -Pattern '^id\s*=\s*''([^'']+)''' -ErrorAction SilentlyContinue
+                  if ($idMatch -and $idMatch.Matches.Groups[1].Value) {
+                      $rustdeskId = $idMatch.Matches.Groups[1].Value
+                      break
+                  }
+              }
+              $idOutput = $null
+              try { $idOutput = & $rustdeskExe --get-id 2>$null } catch {}
               if ($idOutput -match '^\d+$') { $rustdeskId = $idOutput.Trim(); break }
               Start-Sleep -Seconds 3
           }
-          if (-not $rustdeskId) { throw "Could not retrieve RustDesk ID after multiple attempts." }
+          
+          if (-not $rustdeskId) { throw "Could not retrieve RustDesk ID." }
           $rustdeskId | Out-File -FilePath (Join-Path $env:WORK_DIR 'rustdesk_id.txt') -Encoding ASCII -NoNewline
+          Write-Host "RustDesk ID obtained: $rustdeskId"
 
           Write-Host "Setting up Firewall rules for RustDesk..."
           New-NetFirewallRule -DisplayName "Layer7-RustDesk-TCP" -Direction Inbound -Protocol TCP -LocalPort 21115-21119 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
