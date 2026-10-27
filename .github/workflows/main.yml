@@ -40,7 +40,6 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          # Chỉ dùng chữ và số để tránh lỗi cú pháp khi chạy CLI
           $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
           $password = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
           
@@ -68,60 +67,92 @@ jobs:
           } catch { Write-Host "Warning: $_" }
           exit 0
 
-      - name: Download RustDesk
+      - name: Download RustDesk MSI
         shell: powershell
         timeout-minutes: 3
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "Downloading RustDesk 1.5.0..."
-          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.exe" -OutFile "$env:TEMP_DIR\rustdesk.exe" -UseBasicParsing
+          Write-Host "Downloading RustDesk MSI..."
+          # Tải bằng link trực tiếp, không qua API
+          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.msi" -OutFile "$env:TEMP_DIR\rustdesk.msi" -UseBasicParsing
 
-      - name: Install RustDesk Silently
+      - name: Install RustDesk MSI
         shell: powershell
         timeout-minutes: 5
         run: |
-          $ErrorActionPreference = 'Stop'
-          Write-Host "Installing RustDesk (Headless Mode)..."
-          # Chạy cài đặt ngầm, không hiện cửa sổ
-          $p = Start-Process -FilePath "$env:TEMP_DIR\rustdesk.exe" -ArgumentList '--silent-install' -Wait -PassThru -WindowStyle Hidden
+          $ErrorActionPreference = 'Continue'
+          Write-Host "Installing RustDesk via MSI..."
           
-          # Tắt tiến trình GUI (nếu có) để tránh treo do không có màn hình
-          Write-Host "Killing any lingering GUI processes..."
+          # Sử dụng msiexec với timeout để tránh treo vô hạn
+          $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$env:TEMP_DIR\rustdesk.msi`" /qn /norestart" -PassThru -WindowStyle Hidden
+          
+          if (-not $proc.WaitForExit(180000)) {
+              Write-Host "MSI installation timed out after 3 minutes, killing process..."
+              $proc.Kill()
+          } else {
+              Write-Host "MSI installation finished with exit code: $($proc.ExitCode)"
+          }
+          
+          # Tắt các process GUI bị treo (nếu có)
           Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 3
+
+      - name: Locate RustDesk Executable
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "Finding rustdesk.exe..."
+          
+          # Tìm ở mọi ngóc ngách có thể
+          $paths = @(
+              "$env:ProgramFiles\RustDesk\rustdesk.exe",
+              "${env:ProgramFiles(x86)}\RustDesk\rustdesk.exe",
+              "$env:LOCALAPPDATA\Programs\RustDesk\rustdesk.exe",
+              "$env:LOCALAPPDATA\RustDesk\rustdesk.exe"
+          )
+          
+          $rustdeskExe = $null
+          foreach ($p in $paths) {
+              if (Test-Path $p) { $rustdeskExe = $p; break }
+          }
+          
+          if (-not $rustdeskExe) {
+              $rustdeskExe = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter rustdesk.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
+          }
+          
+          if (-not $rustdeskExe) { throw "rustdesk.exe not found." }
+          
+          Write-Host "Found at: $rustdeskExe"
+          "RUSTDESK_EXE=$rustdeskExe" >> $env:GITHUB_ENV
 
       - name: Install RustDesk Service
         shell: powershell
         timeout-minutes: 3
         run: |
-          $ErrorActionPreference = 'Stop'
-          $rustdeskExe = "$env:ProgramFiles\RustDesk\rustdesk.exe"
-          if (-not (Test-Path $rustdeskExe)) {
-              $rustdeskExe = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter rustdesk.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
-          }
-          if (-not $rustdeskExe) { throw "rustdesk.exe not found." }
-          "RUSTDESK_EXE=$rustdeskExe" >> $env:GITHUB_ENV
-
+          $ErrorActionPreference = 'Continue'
           Write-Host "Installing RustDesk Service..."
-          Start-Process -FilePath $rustdeskExe -ArgumentList '--install-service' -Wait -NoNewWindow
+          Start-Process -FilePath $env:RUSTDESK_EXE -ArgumentList '--install-service' -Wait -NoNewWindow
           
           Write-Host "Starting RustDesk Service..."
           Start-Service -Name RustDesk -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 5
           
-          Write-Host "Killing GUI again just in case..."
+          Write-Host "Killing GUI processes to avoid hang..."
           Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
 
       - name: Configure RustDesk Password
         shell: powershell
         timeout-minutes: 3
         run: |
-          $ErrorActionPreference = 'Stop'
-          $rustdeskExe = $env:RUSTDESK_EXE
-          
+          $ErrorActionPreference = 'Continue'
           Write-Host "Setting RustDesk Password..."
-          # Bọc pass trong ngoặc kép
-          Start-Process -FilePath $rustdeskExe -ArgumentList "--password `"$env:GENERATED_PASSWORD`"" -Wait -NoNewWindow
+          
+          $proc = Start-Process -FilePath $env:RUSTDESK_EXE -ArgumentList "--password `"$env:GENERATED_PASSWORD`"" -PassThru -NoNewWindow
+          
+          if (-not $proc.WaitForExit(15000)) {
+              Write-Host "Password configuration timed out, killing..."
+              $proc.Kill()
+          }
           Start-Sleep -Seconds 3
 
       - name: Get RustDesk ID
@@ -129,12 +160,11 @@ jobs:
         timeout-minutes: 3
         run: |
           $ErrorActionPreference = 'Continue'
-          $rustdeskExe = $env:RUSTDESK_EXE
-          
           Write-Host "Getting RustDesk ID..."
+          
           $rustdeskId = $null
           for ($i = 1; $i -le 10 -and -not $rustdeskId; $i++) {
-            $idOutput = @(& $rustdeskExe --get-id 2>&1)
+            $idOutput = @(& $env:RUSTDESK_EXE --get-id 2>&1)
             foreach ($line in $idOutput) {
               if (([string]$line).Trim() -match '^\d{6,20}$') { $rustdeskId = $matches[0]; break }
             }
@@ -142,7 +172,8 @@ jobs:
           }
           
           if (-not $rustdeskId) { 
-              throw "Failed to get RustDesk ID."
+              Write-Host "Failed to get RustDesk ID."
+              exit 1 
           }
           
           Write-Host "RustDesk ID obtained: $rustdeskId"
@@ -160,8 +191,7 @@ jobs:
             '## Layer7 Store Cloud PC (RustDesk)',
             "- Order: $nodeId",
             "- RustDesk ID: $env:RUSTDESK_ID",
-            "- Password: $env:GENERATED_PASSWORD",
-            "*(Mở app RustDesk, nhập ID và Pass để kết nối)*"
+            "- Password: $env:GENERATED_PASSWORD"
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
