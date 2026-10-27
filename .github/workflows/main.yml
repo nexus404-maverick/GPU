@@ -1,4 +1,4 @@
-name: Layer7 Store Cloud PC (VNC)
+name: Layer7 Store Cloud PC (RustDesk)
 
 on:
   workflow_dispatch:
@@ -40,25 +40,12 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
-          $lower = 'abcdefghijkmnopqrstuvwxyz'
-          $digits = '23456789'
-          
-          $pass = @(
-            $upper[(Get-Random -Maximum $upper.Length)]
-            $lower[(Get-Random -Maximum $lower.Length)]
-            $digits[(Get-Random -Maximum $digits.Length)]
-          )
-          $allChars = $upper + $lower + $digits
-          for ($i = 0; $i -lt 10; $i++) {
-              $pass += $allChars[(Get-Random -Maximum $allChars.Length)]
-          }
-          $password = -join ($pass | Sort-Object { Get-Random })
+          # Chỉ dùng chữ và số để tránh lỗi cú pháp khi chạy CLI
+          $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+          $password = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
           
           "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
           "RDP_USERNAME=Layer7Store" >> $env:GITHUB_ENV
-          # VNC chỉ hỗ trợ tối đa 8 ký tự
-          "VNC_PASSWORD=$($password.Substring(0,8))" >> $env:GITHUB_ENV
 
       - name: Setup Windows account
         shell: powershell
@@ -81,71 +68,85 @@ jobs:
           } catch { Write-Host "Warning: $_" }
           exit 0
 
-      - name: Download TightVNC
+      - name: Download RustDesk
         shell: powershell
         timeout-minutes: 3
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "Downloading TightVNC..."
-          Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.84/tightvnc-2.8.84-gpl-setup-64bit.msi" -OutFile "$env:TEMP_DIR\tightvnc.msi" -UseBasicParsing
+          Write-Host "Downloading RustDesk 1.5.0..."
+          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.exe" -OutFile "$env:TEMP_DIR\rustdesk.exe" -UseBasicParsing
 
-      - name: Install TightVNC silently
+      - name: Install RustDesk Silently
         shell: powershell
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "Installing TightVNC..."
-          $p = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$env:TEMP_DIR\tightvnc.msi`" /qn /norestart" -Wait -PassThru
-          if ($p.ExitCode -notin @(0, 1641, 3010)) { throw "TightVNC install failed: $($p.ExitCode)" }
-          Write-Host "Install finished."
+          Write-Host "Installing RustDesk (Headless Mode)..."
+          # Chạy cài đặt ngầm, không hiện cửa sổ
+          $p = Start-Process -FilePath "$env:TEMP_DIR\rustdesk.exe" -ArgumentList '--silent-install' -Wait -PassThru -WindowStyle Hidden
+          
+          # Tắt tiến trình GUI (nếu có) để tránh treo do không có màn hình
+          Write-Host "Killing any lingering GUI processes..."
+          Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
 
-      - name: Configure and Start TightVNC
+      - name: Install RustDesk Service
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rustdeskExe = "$env:ProgramFiles\RustDesk\rustdesk.exe"
+          if (-not (Test-Path $rustdeskExe)) {
+              $rustdeskExe = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter rustdesk.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
+          }
+          if (-not $rustdeskExe) { throw "rustdesk.exe not found." }
+          "RUSTDESK_EXE=$rustdeskExe" >> $env:GITHUB_ENV
+
+          Write-Host "Installing RustDesk Service..."
+          Start-Process -FilePath $rustdeskExe -ArgumentList '--install-service' -Wait -NoNewWindow
+          
+          Write-Host "Starting RustDesk Service..."
+          Start-Service -Name RustDesk -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
+          
+          Write-Host "Killing GUI again just in case..."
+          Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
+
+      - name: Configure RustDesk Password
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rustdeskExe = $env:RUSTDESK_EXE
+          
+          Write-Host "Setting RustDesk Password..."
+          # Bọc pass trong ngoặc kép
+          Start-Process -FilePath $rustdeskExe -ArgumentList "--password `"$env:GENERATED_PASSWORD`"" -Wait -NoNewWindow
+          Start-Sleep -Seconds 3
+
+      - name: Get RustDesk ID
         shell: powershell
         timeout-minutes: 3
         run: |
           $ErrorActionPreference = 'Continue'
-          $vncExe = "C:\Program Files\TightVNC\tvnserver.exe"
-          if (-not (Test-Path $vncExe)) { throw "tvnserver.exe not found." }
-
-          Write-Host "Setting VNC password..."
-          # Sử dụng timeout 10s để tránh bị treo vô hạn
-          $proc = Start-Process -FilePath $vncExe -ArgumentList "-controlservice -passwd `"$env:VNC_PASSWORD`"" -PassThru -NoNewWindow
-          if (-not $proc.WaitForExit(10000)) {
-              Write-Host "VNC password process timed out, killing it..."
-              $proc.Kill()
+          $rustdeskExe = $env:RUSTDESK_EXE
+          
+          Write-Host "Getting RustDesk ID..."
+          $rustdeskId = $null
+          for ($i = 1; $i -le 10 -and -not $rustdeskId; $i++) {
+            $idOutput = @(& $rustdeskExe --get-id 2>&1)
+            foreach ($line in $idOutput) {
+              if (([string]$line).Trim() -match '^\d{6,20}$') { $rustdeskId = $matches[0]; break }
+            }
+            if (-not $rustdeskId) { Start-Sleep -Seconds 3 }
           }
-
-          Write-Host "Starting VNC Service..."
-          Start-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 5
-
-          Write-Host "Opening Firewall Port 5900..."
-          New-NetFirewallRule -DisplayName 'VNC TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5900 -ErrorAction SilentlyContinue | Out-Null
-
-      - name: Setup Bore Tunnel for VNC
-        shell: powershell
-        timeout-minutes: 5
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.5.3/bore-v0.5.3-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP_DIR\bore.zip" -UseBasicParsing
-          Expand-Archive -Path "$env:TEMP_DIR\bore.zip" -DestinationPath "$env:TEMP_DIR\bore" -Force
           
-          $boreExe = "$env:TEMP_DIR\bore\bore.exe"
-          $boreLog = "$env:TEMP_DIR\bore.log"
-          
-          Write-Host "Starting Bore tunnel for VNC (port 5900)..."
-          Start-Process -FilePath $boreExe -ArgumentList "local 5900 --to bore.pub" -WindowStyle Hidden -RedirectStandardOutput $boreLog
-          
-          Start-Sleep -Seconds 15
-          $publicAddress = $null
-          if (Test-Path $boreLog) {
-              $logContent = Get-Content $boreLog -Raw
-              if ($logContent -match 'listening at (bore\.pub:\d+)') { $publicAddress = $matches[1] }
+          if (-not $rustdeskId) { 
+              throw "Failed to get RustDesk ID."
           }
-          if (-not $publicAddress) { throw 'Failed to get Bore public address.' }
           
-          Write-Host "VNC Address: $publicAddress"
-          "BORE_ADDRESS=$publicAddress" >> $env:GITHUB_ENV
+          Write-Host "RustDesk ID obtained: $rustdeskId"
+          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
 
       - name: Publish Connection Information
         shell: powershell
@@ -156,20 +157,20 @@ jobs:
           $nodeId = [string]'${{ github.event.inputs.instance_number }}'
           
           $summary = @(
-            '## Layer7 Store Cloud PC (VNC)',
+            '## Layer7 Store Cloud PC (RustDesk)',
             "- Order: $nodeId",
-            "- VNC Address: $env:BORE_ADDRESS",
-            "- VNC Password: $env:VNC_PASSWORD",
-            "*(Lưu ý: Không cần nhập Username)*"
+            "- RustDesk ID: $env:RUSTDESK_ID",
+            "- Password: $env:GENERATED_PASSWORD",
+            "*(Mở app RustDesk, nhập ID và Pass để kết nối)*"
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
           if (-not [string]::IsNullOrWhiteSpace($env:PHONE_SERVER_URL)) {
             $url = "$($env:PHONE_SERVER_URL.TrimEnd('/'))/api/provision/$nodeId"
-            $body = @{ remote_id = $env:BORE_ADDRESS; password = $env:VNC_PASSWORD; type = "vnc" } | ConvertTo-Json
+            $body = @{ remote_id = $env:RUSTDESK_ID; password = $env:GENERATED_PASSWORD; type = "rustdesk" } | ConvertTo-Json
             try {
               Invoke-RestMethod -Uri $url -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 30 | Out-Null
-              Write-Host 'Successfully sent VNC info to Server.'
+              Write-Host 'Successfully sent RustDesk info to Server.'
             } catch { Write-Host "Failed to send Server: $($_.Exception.Message)" }
           }
 
@@ -186,12 +187,10 @@ jobs:
           Write-Host "Session ends at: $end"
           
           while ((Get-Date) -lt $end) {
-            $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
-            if (-not $boreProc) {
-                Start-Process -FilePath "$env:TEMP_DIR\bore\bore.exe" -ArgumentList "local 5900 --to bore.pub" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP_DIR\bore.log"
+            $svc = Get-Service -Name RustDesk -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Running') {
+              Start-Service -Name RustDesk -ErrorAction SilentlyContinue
             }
-            $vncSvc = Get-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-            if ($vncSvc -and $vncSvc.Status -ne 'Running') { Start-Service -Name "tvnserver" -ErrorAction SilentlyContinue }
             
             $remain = $end - (Get-Date)
             Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
