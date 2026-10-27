@@ -67,16 +67,11 @@ jobs:
           try {
               Write-Host "Disabling password complexity policy..."
               $seceditFile = "$env:TEMP\secpol.inf"
-              
               $seceditContent = @(
-                  "[Unicode]",
-                  "Unicode=yes",
-                  "[System Access]",
-                  "PasswordComplexity = 0",
-                  "MinimumPasswordLength = 0"
+                  "[Unicode]", "Unicode=yes", "[System Access]",
+                  "PasswordComplexity = 0", "MinimumPasswordLength = 0"
               )
               Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
-              
               $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
               Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
               
@@ -104,39 +99,54 @@ jobs:
           }
           exit 0
 
-      - name: Setup Bore Tunnel for RDP
+      - name: Install RustDesk (MSI)
         shell: powershell
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           $ErrorActionPreference = 'Stop'
+          $installer = "$env:TEMP_DIR\rustdesk.msi"
           
-          $boreZip = "$env:TEMP_DIR\bore.zip"
-          Write-Host "Downloading Bore Tunnel..."
-          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.5.3/bore-v0.5.3-x86_64-pc-windows-msvc.zip" -OutFile $boreZip -UseBasicParsing
+          Write-Host "Downloading RustDesk MSI..."
+          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.msi" -OutFile $installer -UseBasicParsing
           
-          Expand-Archive -Path $boreZip -DestinationPath "$env:TEMP_DIR\bore" -Force
-          $boreExe = "$env:TEMP_DIR\bore\bore.exe"
+          Write-Host "Installing RustDesk..."
+          $p = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installer`" /qn /norestart" -Wait -PassThru
           
-          if (-not (Test-Path $boreExe)) { throw 'bore.exe not found.' }
+          if ($p.ExitCode -notin @(0, 1641, 3010)) {
+              throw "RustDesk installation failed with exit code $($p.ExitCode)."
+          }
 
-          Write-Host "Starting Bore tunnel for RDP (port 3389)..."
-          $boreLog = "$env:TEMP_DIR\bore.log"
-          Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -WindowStyle Hidden -RedirectStandardOutput $boreLog
-          
-          Start-Sleep -Seconds 15
+          $rustdeskExe = "$env:ProgramFiles\RustDesk\rustdesk.exe"
+          if (-not (Test-Path $rustdeskExe)) {
+              throw "rustdesk.exe not found at expected path."
+          }
 
-          $publicAddress = $null
-          if (Test-Path $boreLog) {
-              $logContent = Get-Content $boreLog -Raw
-              if ($logContent -match 'listening at (bore\.pub:\d+)') {
-                  $publicAddress = $matches[1]
-              }
+          Write-Host "Installing RustDesk Service..."
+          Start-Process -FilePath $rustdeskExe -ArgumentList "--install-service" -Wait -NoNewWindow
+          Start-Sleep -Seconds 5
+          
+          Write-Host "Starting RustDesk Service..."
+          Start-Service -Name RustDesk -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 10
+
+          Write-Host "Setting RustDesk Password..."
+          Start-Process -FilePath $rustdeskExe -ArgumentList "--password `"$env:GENERATED_PASSWORD`"" -Wait -NoNewWindow
+          Start-Sleep -Seconds 5
+
+          Write-Host "Getting RustDesk ID..."
+          $rustdeskId = $null
+          for ($i = 1; $i -le 15 -and -not $rustdeskId; $i++) {
+            $idOutput = @(& $rustdeskExe --get-id 2>&1)
+            foreach ($line in $idOutput) {
+              if (([string]$line).Trim() -match '^\d{6,20}$') { $rustdeskId = $matches[0]; break }
+            }
+            if (-not $rustdeskId) { Start-Sleep -Seconds 3 }
           }
           
-          if (-not $publicAddress) { throw 'Failed to get Bore public address.' }
+          if (-not $rustdeskId) { throw "Failed to get RustDesk ID." }
           
-          Write-Host "RDP Address obtained: $publicAddress"
-          "BORE_ADDRESS=$publicAddress" >> $env:GITHUB_ENV
+          Write-Host "RustDesk ID obtained: $rustdeskId"
+          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
 
       - name: Install Mesa3D (Software OpenGL)
         shell: powershell
@@ -147,7 +157,6 @@ jobs:
           $archive = Join-Path $env:TEMP_DIR 'mesa.7z'
           New-Item -ItemType Directory -Path $mesaDir -Force | Out-Null
 
-          # Tải trực tiếp bản Mesa3D mới nhất qua link tĩnh
           Write-Host "Downloading Mesa3D..."
           Invoke-WebRequest -Uri 'https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z' -OutFile $archive -UseBasicParsing -TimeoutSec 300
 
@@ -157,14 +166,10 @@ jobs:
             Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $sevenZip -UseBasicParsing
           }
 
-          # Dùng Start-Process để tránh lỗi crash DLL của PowerShell
           Write-Host "Extracting Mesa3D..."
           $process = Start-Process -FilePath $sevenZip -ArgumentList "x `"$archive`" `"-o$mesaDir`" -y" -Wait -PassThru -NoNewWindow
           
-          if ($process.ExitCode -ne 0) { throw 'Failed to extract Mesa3D.' }
-          
-          $dlls = Get-ChildItem -Path $mesaDir -Filter 'opengl32.dll' -Recurse -ErrorAction SilentlyContinue
-          if (-not $dlls) { throw 'Mesa3D DLL not found.' }
+          if ($process.ExitCode -ne 0) { throw "Failed to extract Mesa3D." }
           "MESA3D_DIR=$mesaDir" >> $env:GITHUB_ENV
 
       - name: Optimize storage and set Dark Mode
@@ -188,9 +193,9 @@ jobs:
           $nodeId = [string]'${{ github.event.inputs.instance_number }}'
           
           $summary = @(
-            '## Layer7 Store Cloud PC (RDP)',
+            '## Layer7 Store Cloud PC (RustDesk)',
             "- Order: $nodeId",
-            "- Address: $env:BORE_ADDRESS",
+            "- RustDesk ID: $env:RUSTDESK_ID",
             "- Username: $env:RDP_USERNAME",
             "- Password: $env:GENERATED_PASSWORD"
           )
@@ -204,15 +209,15 @@ jobs:
           $url = "$($env:PHONE_SERVER_URL.TrimEnd('/'))/api/provision/$nodeId"
           
           $body = @{
-            remote_id = $env:BORE_ADDRESS
+            remote_id = $env:RUSTDESK_ID
             password = $env:GENERATED_PASSWORD
             username = $env:RDP_USERNAME
-            type = "rdp"
+            type = "rustdesk"
           } | ConvertTo-Json
           
           try {
             Invoke-RestMethod -Uri $url -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 30 | Out-Null
-            Write-Host 'Successfully sent RDP info to Server.'
+            Write-Host 'Successfully sent RustDesk info to Server.'
           } catch {
             Write-Host "Failed to send Server: $($_.Exception.Message)"
           }
@@ -230,19 +235,17 @@ jobs:
           Write-Host "Session ends at: $end"
           
           while ((Get-Date) -lt $end) {
-            $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
-            if (-not $boreProc) {
-                Write-Host "Bore died! Restarting..."
-                Start-Process -FilePath "$env:TEMP_DIR\bore\bore.exe" -ArgumentList "local 3389 --to bore.pub" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP_DIR\bore.log"
+            $svc = Get-Service -Name RustDesk -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Running') {
+              Start-Service -Name RustDesk -ErrorAction SilentlyContinue
             }
-            
             $remain = $end - (Get-Date)
             Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
             Start-Sleep -Seconds 60
           }
           Write-Host 'Rental session time elapsed.'
 
-      - name: Upload state artifact & Cleanup
+      - name: Cleanup
         if: always()
         shell: powershell
         run: |
