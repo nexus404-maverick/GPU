@@ -53,7 +53,7 @@ jobs:
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1
           Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
 
-          $secure = ConvertTo-SecureString $env:GENERATED_PASSWORD -AsPlainText -Force
+          $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
           $user = Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue
           if ($null -eq $user) {
             New-LocalUser -Name $env:RDP_USERNAME -Password $secure -PasswordNeverExpires -AccountNeverExpires -FullName 'Layer7 Store'
@@ -72,7 +72,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           
-          # Lấy bản release mới nhất
           $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest' -Headers @{ 'User-Agent' = 'Layer7' }
           $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-.*-x86_64\.(msi|exe)$' } | Select-Object -First 1
           if (-not $asset) { throw 'Không tìm thấy gói cài RustDesk.' }
@@ -80,7 +79,6 @@ jobs:
           $installer = Join-Path $env:TEMP_DIR $asset.name
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installer
 
-          # Cài đặt
           if ($asset.name -match '\.msi$') {
             $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', "`"$installer`"", '/qn', '/norestart') -Wait -PassThru
           } else {
@@ -88,7 +86,6 @@ jobs:
           }
           if ($p.ExitCode -notin @(0, 1641, 3010)) { throw "Lỗi cài RustDesk: $($p.ExitCode)" }
 
-          # Tìm file exe
           $rustdeskExe = "$env:ProgramFiles\RustDesk\rustdesk.exe"
           if (-not (Test-Path $rustdeskExe)) {
             $rustdeskExe = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter rustdesk.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
@@ -96,15 +93,15 @@ jobs:
           if (-not $rustdeskExe) { throw 'Không tìm thấy rustdesk.exe sau khi cài.' }
           "RUSTDESK_EXE=$rustdeskExe" >> $env:GITHUB_ENV
 
-          # Cài Service và Set Pass
           & $rustdeskExe --install-service
           Start-Sleep -Seconds 5
           Start-Service -Name RustDesk -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 5
-          & $rustdeskExe --password $env:GENERATED_PASSWORD
+          
+          # BỌC BIẾN PASSWORD TRONG NGOẶC KÉP ĐỂ TRÁNH LỖI KÝ TỰ ĐẶC BIỆT
+          & $rustdeskExe --password "$env:GENERATED_PASSWORD"
           Start-Sleep -Seconds 3
 
-          # Lấy ID
           $rustdeskId = $null
           for ($i = 1; $i -le 15 -and -not $rustdeskId; $i++) {
             $idOutput = @(& $rustdeskExe --get-id 2>&1)
@@ -113,10 +110,10 @@ jobs:
             }
             if (-not $rustdeskId) { Start-Sleep -Seconds 3 }
           }
+          # DÙNG NHÁY ĐƠN CHO THÔNG BÁO LỖI
           if (-not $rustdeskId) { throw 'Không lấy được RustDesk ID.' }
           "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
 
-          # Mở Firewall
           New-NetFirewallRule -DisplayName 'RustDesk TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 21115-21119 -ErrorAction SilentlyContinue | Out-Null
           New-NetFirewallRule -DisplayName 'RustDesk UDP' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 21116 -ErrorAction SilentlyContinue | Out-Null
 
@@ -134,7 +131,6 @@ jobs:
           if (-not $asset) { throw 'Không tìm thấy gói Mesa3D.' }
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
 
-          # Tải 7zr.exe siêu nhẹ để giải nén (không cần cài 7-Zip)
           $sevenZip = "$env:TEMP_DIR\7zr.exe"
           if (-not (Test-Path $sevenZip)) {
             Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $sevenZip
@@ -151,17 +147,14 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
-          # Dọn rác
           Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item 'C:\Windows\Temp\*' -Recurse -Force -ErrorAction SilentlyContinue
           
-          # Dark Mode
           $personalize = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
           New-Item -Path $personalize -Force | Out-Null
           Set-ItemProperty -Path $personalize -Name AppsUseLightTheme -Value 0 -Type DWord
           Set-ItemProperty -Path $personalize -Name SystemUsesLightTheme -Value 0 -Type DWord
 
-          # Audio
           Set-Service -Name Audiosrv -StartupType Automatic -ErrorAction SilentlyContinue
           Start-Service -Name Audiosrv -ErrorAction SilentlyContinue
 
@@ -219,7 +212,6 @@ jobs:
             if ($svc -and $svc.Status -ne 'Running') {
               Start-Service -Name RustDesk -ErrorAction SilentlyContinue
             }
-            # Log thời gian còn lại
             $remain = $end - (Get-Date)
             Write-Host "Còn lại: $($remain.ToString('hh\:mm\:ss'))"
             Start-Sleep -Seconds 60
