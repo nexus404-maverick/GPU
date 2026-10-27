@@ -260,7 +260,6 @@ jobs:
           
           $tomlPath = Join-Path $configDir 'RustDesk.toml'
           
-          # Sử dụng mảng chuỗi thay vì Here-String để tránh lỗi cú pháp YAML
           $tomlLines = @(
               "id = ''"
               "password = '$($env:SECRET_RDP_PASSWORD)'"
@@ -279,23 +278,58 @@ jobs:
           Start-Service -Name $svcName -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 5
 
+          # --- ĐIỂM SỬA ĐỔI QUAN TRỌNG: KHỞI CHẠY TIẾN TRÌNH ĐỂ BUỘC TẠO ID ---
+          Write-Host "Starting a RustDesk process to force ID generation..."
+          # Khởi chạy tiến trình nền, không chờ (vì có thể bị treo), và ẩn cửa sổ
+          Start-Process -FilePath $rustdeskExe -WindowStyle Hidden -ErrorAction SilentlyContinue
+          
+          # Đợi một khoảng thời gian để tiến trình khởi tạo và ghi ID vào file cấu hình
+          Start-Sleep -Seconds 10
+
           Write-Host "Retrieving RustDesk ID..."
           $rustdeskId = $null
-          for ($i = 0; $i -lt 10; $i++) {
+          # Tăng số lần thử và thời gian chờ để đảm bảo ID kịp được tạo
+          for ($i = 0; $i -lt 20; $i++) {
+              # 1. Thử đọc từ file cấu hình TOML trước (đây là cách đáng tin cậy nhất)
               if (Test-Path $tomlPath) {
                   $idMatch = Select-String -Path $tomlPath -Pattern '^id\s*=\s*''([^'']+)''' -ErrorAction SilentlyContinue
                   if ($idMatch -and $idMatch.Matches.Groups[1].Value) {
                       $rustdeskId = $idMatch.Matches.Groups[1].Value
+                      Write-Host "ID found in TOML configuration file."
                       break
                   }
               }
+              
+              # 2. Nếu file chưa có ID, thử dùng CLI với timeout ngắn (phòng trường hợp CLI hoạt động)
               $idOutput = $null
-              try { $idOutput = & $rustdeskExe --get-id 2>$null } catch {}
-              if ($idOutput -match '^\d+$') { $rustdeskId = $idOutput.Trim(); break }
+              try { 
+                  # Sử dụng timeout để tránh bị treo vô hạn
+                  $job = Start-Job -ScriptBlock { & $using:rustdeskExe --get-id 2>$null }
+                  if (Wait-Job $job -Timeout 5) {
+                      $idOutput = Receive-Job $job
+                  }
+                  Remove-Job $job -Force -ErrorAction SilentlyContinue
+              } catch {}
+              
+              if ($idOutput -and $idOutput -match '^\d+$') { 
+                  $rustdeskId = $idOutput.Trim(); 
+                  Write-Host "ID found via CLI."
+                  break 
+              }
+              
+              Write-Host "Attempt $($i+1): ID not ready yet, waiting..."
               Start-Sleep -Seconds 3
           }
           
-          if (-not $rustdeskId) { throw "Could not retrieve RustDesk ID." }
+          if (-not $rustdeskId) { 
+              # In ra nội dung file cấu hình để debug nếu vẫn thất bại
+              if (Test-Path $tomlPath) {
+                  Write-Host "Current RustDesk.toml content:"
+                  Get-Content $tomlPath | ForEach-Object { Write-Host $_ }
+              }
+              throw "Could not retrieve RustDesk ID after multiple attempts." 
+          }
+          
           $rustdeskId | Out-File -FilePath (Join-Path $env:WORK_DIR 'rustdesk_id.txt') -Encoding ASCII -NoNewline
           Write-Host "RustDesk ID obtained: $rustdeskId"
 
