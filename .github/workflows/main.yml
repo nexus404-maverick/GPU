@@ -1,225 +1,626 @@
-name: Provision Cloud PC
+name: Layer7 RDP Windows Server 2025
 
 on:
   workflow_dispatch:
     inputs:
-      instance_number:
-        description: 'Mã đơn hàng (VD: ORD-123)'
-        required: true
+      durasi_menit:
+        description: 'Thời lượng phiên (phút), 10-360'
+        required: false
+        default: '360'
         type: string
-      hours:
-        description: 'Số giờ thuê (VD: 3)'
-        required: true
-        default: '3'
+      hostname:
+        description: 'Hostname (chỉ chữ, số, dấu gạch nối)'
+        required: false
+        default: 'rdpfree'
         type: string
+      rdp_user:
+        description: 'Tên tài khoản RDP (3-20 ký tự)'
+        required: false
+        default: 'xyadmin'
+        type: string
+      akses:
+        description: 'Phương thức truy cập'
+        required: false
+        default: 'rustdesk'
+        type: choice
+        options: [rustdesk]
+      runner:
+        description: 'Runner (chỉ windows-2025)'
+        required: false
+        default: 'windows-2025'
+        type: choice
+        options: [windows-2025]
+      storage_boost:
+        required: false
+        default: 'ya'
+        type: choice
+        options: [ya, tidak]
+      debloat:
+        required: false
+        default: 'ringan'
+        type: choice
+        options: [ringan, full, tidak]
+      win10:
+        required: false
+        default: 'ya'
+        type: choice
+        options: [ya, tidak]
+      ekstra:
+        required: false
+        default: 'ya'
+        type: choice
+        options: [ya, tidak]
+      grafis:
+        required: false
+        default: 'software'
+        type: choice
+        options: [software, tidak]
+      microphone:
+        required: false
+        default: 'ya'
+        type: choice
+        options: [ya, tidak]
+      samp:
+        required: false
+        default: 'ya'
+        type: choice
+        options: [ya, tidak]
+      roblox:
+        required: false
+        default: 'tidak'
+        type: choice
+        options: [ya, tidak]
+      minecraft_java:
+        required: false
+        default: 'tidak'
+        type: choice
+        options: [ya, tidak]
+      minecraft_bedrock:
+        required: false
+        default: 'tidak'
+        type: choice
+        options: [ya, tidak]
+      discord:
+        required: false
+        default: 'tidak'
+        type: choice
+        options: [ya, tidak]
+      perpanjang_otomatis:
+        required: false
+        default: 'tidak'
+        type: choice
+        options: [ya, tidak]
 
 permissions:
-  actions: write
   contents: read
+  actions: read
+
+concurrency:
+  group: layer7-windows-2025-rdp
+  cancel-in-progress: false
+
+env:
+  DUR: ${{ inputs.durasi_menit || '360' }}
+  HOSTNAME: ${{ inputs.hostname || 'rdpfree' }}
+  RDP_USER: ${{ inputs.rdp_user || 'xyadmin' }}
+  AKSES: ${{ inputs.akses || 'rustdesk' }}
+  STORAGE_BOOST: ${{ inputs.storage_boost || 'ya' }}
+  DEBLOAT: ${{ inputs.debloat || 'ringan' }}
+  SAMP: ${{ inputs.samp || 'ya' }}
+  WIN10: ${{ inputs.win10 || 'ya' }}
+  EKSTRA: ${{ inputs.ekstra || 'ya' }}
+  GRAFIS: ${{ inputs.grafis || 'software' }}
+  MICROPHONE: ${{ inputs.microphone || 'ya' }}
+  ROBLOX: ${{ inputs.roblox || 'tidak' }}
+  MINECRAFT_JAVA: ${{ inputs.minecraft_java || 'tidak' }}
+  MINECRAFT_BEDROCK: ${{ inputs.minecraft_bedrock || 'tidak' }}
+  DISCORD: ${{ inputs.discord || 'tidak' }}
+  PERPANJANG_OTOMATIS: ${{ inputs.perpanjang_otomatis || 'tidak' }}
+  WORK_DIR: 'C:\Layer7'
+  PERSIST_DIR: 'C:\Layer7\persist'
+  TEMP_DIR: 'C:\Layer7\temp'
 
 jobs:
-  deploy-instance:
+  rdp:
+    name: Layer7 Windows Server 2025
     runs-on: windows-2025
-    timeout-minutes: 330
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v5
-
-      # ============================================================
-      # 1. TẠO MẬT KHẨU NGẪU NHIÊN
-      # ============================================================
-      - name: Generate Random Password
-        id: gen_pass
-        shell: powershell
+      # ------------------------------------------------------------------
+      # 1. XÁC THỰC INPUT VÀ SECRET
+      # ------------------------------------------------------------------
+      - name: Validate inputs and secrets
+        shell: pwsh
+        env:
+          SECRET_RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-          $password = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-          echo "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
+          $ErrorActionPreference = 'Stop'
+          Write-Host "::add-mask::$env:SECRET_RDP_PASSWORD"
 
-      # ============================================================
-      # 2. BẬT RDP & TẠO USER
-      # ============================================================
-      - name: Enable RDP and Create User
-        shell: powershell
+          if ([string]::IsNullOrWhiteSpace($env:SECRET_RDP_PASSWORD)) {
+              throw "RDP_PASSWORD secret is missing or empty. This will be used as RustDesk password."
+          }
+
+          if ($env:DUR -notmatch '^\d+$') { throw "durasi_menit must be numeric." }
+          $durInt = [int]$env:DUR
+          if ($durInt -lt 10 -or $durInt -gt 360) { throw "durasi_menit must be 10-360." }
+
+          if ($env:HOSTNAME -notmatch '^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,13}[a-zA-Z0-9])?$') {
+              throw "hostname contains invalid characters."
+          }
+          if ($env:RDP_USER.Length -lt 3 -or $env:RDP_USER.Length -gt 20) {
+              throw "rdp_user must be 3-20 characters."
+          }
+
+          $choiceInputs = @{
+              'AKSES' = @('rustdesk'); 'STORAGE_BOOST' = @('ya','tidak');
+              'DEBLOAT' = @('ringan','full','tidak'); 'WIN10' = @('ya','tidak');
+              'EKSTRA' = @('ya','tidak'); 'GRAFIS' = @('software','tidak');
+              'MICROPHONE' = @('ya','tidak'); 'SAMP' = @('ya','tidak');
+              'ROBLOX' = @('ya','tidak'); 'MINECRAFT_JAVA' = @('ya','tidak');
+              'MINECRAFT_BEDROCK' = @('ya','tidak'); 'DISCORD' = @('ya','tidak');
+              'PERPANJANG_OTOMATIS' = @('ya','tidak')
+          }
+          foreach ($key in $choiceInputs.Keys) {
+              $val = [Environment]::GetEnvironmentVariable($key)
+              if ($choiceInputs[$key] -notcontains $val) {
+                  throw "Invalid value for $key : '$val'"
+              }
+          }
+
+          if ($env:PERPANJANG_OTOMATIS -eq 'ya') {
+              Write-Warning "perpanjang_otomatis=ya is ignored: hosted runners cannot exceed 6-hour limit."
+          }
+          Write-Host "✅ Input validation passed. RDP_PASSWORD will be used for RustDesk."
+
+      # ------------------------------------------------------------------
+      # 2. KHỞI TẠO
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            assets
+          sparse-checkout-cone-mode: false
+
+      - name: Initialize directories
+        shell: pwsh
         run: |
-          # Bật RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
-          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
-          
-          # Tạo User
-          $Username = "Layer7Store"
-          $Password = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
-          $User = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
-          if ($null -eq $User) {
-              New-LocalUser -Name $Username -Password $Password -PasswordNeverExpires -AccountNeverExpires -FullName "Layer7 Store"
+          $ErrorActionPreference = 'Stop'
+          foreach ($d in @($env:WORK_DIR, $env:PERSIST_DIR, $env:TEMP_DIR)) {
+              if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+          }
+          Write-Host "=== Environment ==="
+          Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, CsTotalPhysicalMemory | Format-List
+
+      # ------------------------------------------------------------------
+      # 3. THIẾT LẬP RDP (vẫn giữ để dự phòng)
+      # ------------------------------------------------------------------
+      - name: Setup RDP user and service (fallback access)
+        shell: pwsh
+        env:
+          SECRET_RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "::add-mask::$env:SECRET_RDP_PASSWORD"
+
+          $user = $env:RDP_USER
+          $pass = $env:SECRET_RDP_PASSWORD
+
+          $existing = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+          if (-not $existing) {
+              $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
+              New-LocalUser -Name $user -Password $securePass -PasswordNeverExpires -AccountNeverExpires -Description "Layer7 RDP user" | Out-Null
           } else {
-              Set-LocalUser -Name $Username -Password $Password
-          }
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $Username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Administrators" -Member $Username -ErrorAction SilentlyContinue
-          Write-Host "User created: $Username"
-
-      # ============================================================
-      # 3. DỌN DẸP ICON MÀN HÌNH
-      # ============================================================
-      - name: Clean Desktop Icons
-        shell: powershell
-        run: |
-          Write-Host "Cleaning desktop icons..."
-          
-          # Xóa shortcut ngoài Desktop của User và Public
-          Remove-Item -Path "C:\Users\Public\Desktop\*" -Include *.lnk, *.url -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Users\Layer7Store\Desktop\*" -Include *.lnk, *.url -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Users\runneradmin\Desktop\*" -Include *.lnk, *.url -Force -ErrorAction SilentlyContinue
-
-          # Ẩn các icon hệ thống mặc định
-          $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
-          if (-not (Test-Path $RegPath)) { New-Item -Path $RegPath -Force | Out-Null }
-
-          $HideIcons = @(
-              "{645FF040-5081-101B-9F08-00AA002F954E}", # Recycle Bin
-              "{20D04FE0-3AEA-1069-A2D8-08002B30309D}", # This PC
-              "{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}", # Network
-              "{59031a47-3f72-44a7-89c5-5595fe6b30ee}", # User Files
-              "{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}"  # Control Panel
-          )
-          foreach ($GUID in $HideIcons) {
-              Set-ItemProperty -Path $RegPath -Name $GUID -Value 1 -Type DWord -Force
+              $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
+              Set-LocalUser -Name $user -Password $securePass
           }
 
-          Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-          Write-Host "Desktop cleaned."
-
-      # ============================================================
-      # 4. CÀI ĐẶT RUSTDESK
-      # ============================================================
-      - name: Install RustDesk
-        shell: powershell
-        timeout-minutes: 5
-        run: |
-          Write-Host "Downloading RustDesk..."
-          $rustdeskUrl = "https://github.com/rustdesk/rustdesk/releases/download/1.3.7/rustdesk-1.3.7-x86_64.exe"
-          $installer = "$env:TEMP\rustdesk.exe"
-          Invoke-WebRequest -Uri $rustdeskUrl -OutFile $installer -UseBasicParsing
-          
-          Write-Host "Installing RustDesk..."
-          Start-Process -FilePath $installer -ArgumentList "--silent-install" -WindowStyle Hidden | Out-Null
-          
-          $elapsed = 0
-          while ($elapsed -lt 60 -and -not (Test-Path "C:\Program Files\RustDesk\rustdesk.exe")) {
-              Start-Sleep -Seconds 5
-              $elapsed += 5
+          $rdpGroup = Get-LocalGroup -SID 'S-1-5-32-555' -ErrorAction SilentlyContinue
+          if ($rdpGroup) {
+              $members = Get-LocalGroupMember -Group $rdpGroup.Name -ErrorAction SilentlyContinue
+              if (-not ($members | Where-Object { $_.Name -like "*\$user" })) {
+                  Add-LocalGroupMember -Group $rdpGroup.Name -Member $user
+              }
+          } else {
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user
           }
-          
-          & "C:\Program Files\RustDesk\rustdesk.exe" --install-service
-          Start-Sleep -Seconds 10
-          Start-Service -Name "RustDesk" -ErrorAction SilentlyContinue
 
-      # ============================================================
-      # 5. LẤY RUSTDESK ID (ĐÃ FIX LỖI)
-      # ============================================================
-      - name: Set RustDesk Password and Get ID
-        shell: powershell
-        timeout-minutes: 5
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -Type DWord -Force
+
+          # Firewall: mở RDP cho tất cả (dự phòng), RustDesk sẽ là kênh chính
+          $rdpRule = "Layer7-RDP-Fallback"
+          Remove-NetFirewallRule -DisplayName $rdpRule -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName $rdpRule -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -Profile Any | Out-Null
+
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService -ErrorAction SilentlyContinue
+          $svc = Get-Service -Name TermService
+          if ($svc.Status -ne 'Running') { throw "TermService not running." }
+          Write-Host "RDP fallback ready on port 3389."
+
+      # ------------------------------------------------------------------
+      # 4. CÀI ĐẶT VÀ CẤU HÌNH RUSTDESK
+      # ------------------------------------------------------------------
+      - name: Install and configure RustDesk
+        shell: pwsh
+        env:
+          SECRET_RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          $rustdeskExe = "C:\Program Files\RustDesk\rustdesk.exe"
-          
-          Write-Host "Setting password: $env:GENERATED_PASSWORD"
-          & $rustdeskExe --password "$env:GENERATED_PASSWORD"
-          Start-Sleep -Seconds 5
-          
-          Write-Host "Waiting for RustDesk to generate ID..."
-          Start-Sleep -Seconds 10
+          $ErrorActionPreference = 'Stop'
+          Write-Host "::add-mask::$env:SECRET_RDP_PASSWORD"
 
+          # --- Tải RustDesk bản mới nhất từ GitHub ---
+          Write-Host "--- Fetching latest RustDesk release ---"
+          $releaseApi = 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest'
+          $release = Invoke-RestMethod -Uri $releaseApi -Headers @{ 'User-Agent' = 'Layer7-Workflow' } -TimeoutSec 60
+          $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[\d\.]+-x86_64\.exe$' } | Select-Object -First 1
+          if (-not $asset) {
+              # Fallback: thử tìm file .msi nếu không có .exe
+              $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[\d\.]+-x86_64\.msi$' } | Select-Object -First 1
+          }
+          if (-not $asset) { throw "Could not find a suitable RustDesk Windows x86_64 asset in latest release." }
+
+          $downloadUrl = $asset.browser_download_url
+          $installerPath = Join-Path $env:TEMP_DIR $asset.name
+          Write-Host "Downloading $($asset.name) ..."
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath -UseBasicParsing -TimeoutSec 300
+          if ((Get-Item $installerPath).Length -lt 1MB) { throw "RustDesk installer appears too small." }
+
+          # --- Cài đặt silent ---
+          if ($installerPath -match '\.msi$') {
+              $proc = Start-Process msiexec.exe -ArgumentList @('/i', "`"$installerPath`"", '/quiet', '/norestart') -Wait -PassThru -NoNewWindow
+              if ($proc.ExitCode -ne 0) { throw "RustDesk MSI installation failed: $($proc.ExitCode)" }
+          } else {
+              $proc = Start-Process -FilePath $installerPath -ArgumentList '--silent-install' -Wait -PassThru -NoNewWindow
+              if ($proc.ExitCode -ne 0) { throw "RustDesk EXE silent install failed: $($proc.ExitCode)" }
+          }
+          Write-Host "RustDesk installed."
+
+          # --- Đường dẫn rustdesk.exe ---
+          $rustdeskExe = Join-Path $env:ProgramFiles 'RustDesk\rustdesk.exe'
+          if (-not (Test-Path $rustdeskExe)) {
+              $found = Get-ChildItem -Path $env:ProgramFiles, ${env:ProgramFiles(x86)} -Filter 'rustdesk.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($found) { $rustdeskExe = $found.FullName }
+          }
+          if (-not (Test-Path $rustdeskExe)) { throw "rustdesk.exe not found after installation." }
+          Write-Host "RustDesk executable: $rustdeskExe"
+
+          # --- Đảm bảo service đang chạy ---
+          $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+          if ($svc) {
+              if ($svc.Status -ne 'Running') { Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue }
+              Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
+              Write-Host "RustDesk service is running."
+          } else {
+              # Thử cài đặt service nếu chưa có
+              & $rustdeskExe --install-service 2>&1 | ForEach-Object { Write-Host $_ }
+              Start-Sleep -Seconds 3
+              $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+              if ($svc -and $svc.Status -eq 'Running') { Write-Host "RustDesk service installed and running." }
+              else { Write-Warning "RustDesk service not found or not running." }
+          }
+
+          # --- Đặt mật khẩu cố định (dùng RDP_PASSWORD) ---
+          Write-Host "--- Setting RustDesk permanent password ---"
+          & $rustdeskExe --password "$env:SECRET_RDP_PASSWORD" 2>&1 | ForEach-Object { Write-Host $_ }
+          Start-Sleep -Seconds 2
+
+          # --- Lấy ID ---
+          Write-Host "--- Retrieving RustDesk ID ---"
           $rustdeskId = $null
-
-          # Cách 1: Dùng lệnh --get-id
-          for ($i = 1; $i -le 5; $i++) {
-              try {
-                  $output = & $rustdeskExe --get-id 2>&1 | Out-String
-                  if ($output -match "(\d{9,10})") { $rustdeskId = $matches[1]; break }
-              } catch {}
+          for ($i = 0; $i -lt 10; $i++) {
+              $idOutput = & $rustdeskExe --get-id 2>$null
+              if ($idOutput) {
+                  $rustdeskId = ($idOutput | Select-Object -First 1).Trim()
+                  if ($rustdeskId -match '^\d+$') { break }
+              }
               Start-Sleep -Seconds 3
           }
-
-          # Cách 2: Đọc từ file Config
-          if (-not $rustdeskId) {
-              $configPaths = @(
-                  "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-                  "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
-                  "C:\ProgramData\RustDesk\config\RustDesk.toml"
-              )
-              foreach ($path in $configPaths) {
-                  if (Test-Path $path) {
-                      $content = Get-Content $path -Raw -ErrorAction SilentlyContinue
-                      if ($content -match 'id\s*=\s*"(\d+)"') { $rustdeskId = $matches[1]; break }
-                  }
-              }
+          if (-not $rustdeskId -or $rustdeskId -notmatch '^\d+$') {
+              throw "Could not retrieve a valid RustDesk ID after multiple attempts. Output: $rustdeskId"
           }
+          Write-Host "RustDesk ID obtained: $rustdeskId"
 
-          # Cách 3: Đọc từ Registry
-          if (-not $rustdeskId) {
-              $regPaths = @("HKLM:\SOFTWARE\RustDesk", "HKCU:\SOFTWARE\RustDesk")
-              foreach ($reg in $regPaths) {
-                  if (Test-Path $reg) {
-                      $id = (Get-ItemProperty -Path $reg -Name "ID" -ErrorAction SilentlyContinue).ID
-                      if ($id) { $rustdeskId = $id; break }
-                  }
-              }
-          }
+          # Lưu ID vào file để dùng ở bước summary
+          $rustdeskId | Out-File -FilePath (Join-Path $env:WORK_DIR 'rustdesk_id.txt') -Encoding ASCII -NoNewline
+          Write-Host "RustDesk ID saved."
 
-          if ($rustdeskId) {
-              Write-Host "Success! RustDesk ID: $rustdeskId"
-              "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
-          } else {
-              Write-Error "Failed to get RustDesk ID."
-              exit 1
-          }
+          # --- Firewall cho RustDesk ---
+          $rdRule = "Layer7-RustDesk"
+          Remove-NetFirewallRule -DisplayName $rdRule -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName $rdRule -Direction Inbound -Protocol TCP -LocalPort 21115-21119 -Action Allow -Profile Any | Out-Null
+          New-NetFirewallRule -DisplayName "$rdRule-UDP" -Direction Inbound -Protocol UDP -LocalPort 21116 -Action Allow -Profile Any | Out-Null
+          Write-Host "Firewall rules for RustDesk created (TCP 21115-21119, UDP 21116)."
 
-      # ============================================================
-      # 6. GỬI THÔNG TIN VỀ TERMUX (WEBHOOK)
-      # ============================================================
-      - name: Send Credentials to Phone Server
-        shell: powershell
-        env:
-          PHONE_SERVER_URL: ${{ secrets.PHONE_SERVER_URL }}
+      # ------------------------------------------------------------------
+      # 5. TÙY CHỌN HỆ THỐNG
+      # ------------------------------------------------------------------
+      - name: Optimize storage and debloat
+        if: env.STORAGE_BOOST == 'ya' || env.DEBLOAT != 'tidak'
+        shell: pwsh
         run: |
-          $nodeId = "${{ github.event.inputs.instance_number }}"
-          
-          # Xóa dấu / ở cuối URL nếu có
-          $baseUrl = $env:PHONE_SERVER_URL.TrimEnd('/')
-          $url = "$baseUrl/api/provision/$nodeId"
-          
-          $body = @{
-              rustdesk_id       = "$env:RUSTDESK_ID"
-              rustdesk_password = "$env:GENERATED_PASSWORD"
-          } | ConvertTo-Json
-          
+          $ErrorActionPreference = 'Continue'
+          if ($env:STORAGE_BOOST -eq 'ya') {
+              $safePaths = @("$env:LOCALAPPDATA\Temp\*", "$env:TEMP\*", "C:\Windows\Temp\*", "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db")
+              foreach ($p in $safePaths) {
+                  if (Test-Path $p) { try { Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
+              }
+              try { Stop-Service wuauserv -Force -ErrorAction SilentlyContinue } catch {}
+              Remove-Item "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
+              try { Start-Service wuauserv -ErrorAction SilentlyContinue } catch {}
+              Write-Host "Storage boost done."
+          }
+          if ($env:DEBLOAT -eq 'ringan') {
+              Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+              Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'AllowCortana' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+              Write-Host "Light debloat done."
+          } elseif ($env:DEBLOAT -eq 'full') {
+              $bloatApps = @('Microsoft.BingWeather','Microsoft.BingNews','Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.MicrosoftSolitaireCollection','Microsoft.People','Microsoft.WindowsFeedbackHub','Microsoft.XboxApp')
+              foreach ($app in $bloatApps) {
+                  $pkg = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
+                  if ($pkg) { try { Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop } catch {} }
+              }
+              Write-Host "Full debloat (safe) done."
+          }
+
+      - name: Configure dark mode (if enabled)
+        if: env.WIN10 == 'ya'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $user = $env:RDP_USER
+          $userSid = (Get-LocalUser -Name $user).SID.Value
+          $regPath = "Registry::HKEY_USERS\$userSid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+          if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+          Set-ItemProperty -Path $regPath -Name 'AppsUseLightTheme' -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path $regPath -Name 'SystemUsesLightTheme' -Value 0 -Type DWord -Force
+          Write-Host "Dark mode applied."
+
+      - name: Configure audio/microphone (if enabled)
+        if: env.MICROPHONE == 'ya'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $tsPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+          if (-not (Test-Path $tsPolicy)) { New-Item -Path $tsPolicy -Force | Out-Null }
+          Set-ItemProperty -Path $tsPolicy -Name 'fDisableAudioCapture' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $tsPolicy -Name 'fDisableCam' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          Write-Host "Audio/camera policies enabled (best-effort)."
+          Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Select-Object Name, Status | Format-Table -AutoSize | Out-String | Write-Host
+
+      # ------------------------------------------------------------------
+      # 6. ĐỒ HỌA (Mesa3D - tùy chọn)
+      # ------------------------------------------------------------------
+      - name: Setup Mesa3D (if enabled)
+        if: env.GRAFIS == 'software'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host "--- Mesa3D ---"
+          $mesaUrl = 'https://github.com/pal1000/mesa-dist-win/releases/download/25.3.1/mesa3d-25.3.1-release-msvc.7z'
+          $mesaArchive = Join-Path $env:TEMP_DIR 'mesa3d.7z'
+          $mesaDir = Join-Path $env:WORK_DIR 'mesa3d'
           try {
-              $res = Invoke-RestMethod -Uri $url -Method Post -Body $body -ContentType "application/json" -TimeoutSec 30
-              Write-Host "Send to Termux successfully!"
-          } catch {
-              Write-Host "Failed to send to Termux: $_"
+              Invoke-WebRequest -Uri $mesaUrl -OutFile $mesaArchive -UseBasicParsing -TimeoutSec 300
+              if ((Get-Item $mesaArchive).Length -lt 1MB) { throw "Mesa3D archive too small." }
+              $sevenZip = Get-Command '7z.exe' -ErrorAction SilentlyContinue
+              if (-not $sevenZip) {
+                  winget install --id 7zip.7zip --silent --accept-package-agreements --accept-source-agreements | Out-Null
+                  $sevenZip = Get-Command '7z.exe' -ErrorAction SilentlyContinue
+              }
+              if ($sevenZip) { & $sevenZip.Source x $mesaArchive "-o$mesaDir" -y | Out-Null }
+              Write-Host "Mesa3D extracted to $mesaDir (no system-wide injection)."
+          } catch { Write-Warning "Mesa3D skipped: $_" }
+
+      # ------------------------------------------------------------------
+      # 7. SA-MP (tùy chọn)
+      # ------------------------------------------------------------------
+      - name: Setup SA-MP runtime (if enabled)
+        if: env.SAMP == 'ya'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $dxUrl = 'https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe'
+          $dxPath = Join-Path $env:TEMP_DIR 'directx_Jun2010_redist.exe'
+          try {
+              Invoke-WebRequest -Uri $dxUrl -OutFile $dxPath -UseBasicParsing -TimeoutSec 300
+              $dxExtract = Join-Path $env:TEMP_DIR 'dxredist'
+              New-Item -ItemType Directory -Path $dxExtract -Force | Out-Null
+              Start-Process -FilePath $dxPath -ArgumentList "/Q /T:`"$dxExtract`"" -Wait -NoNewWindow
+              $dxSetup = Join-Path $dxExtract 'DXSETUP.exe'
+              if (Test-Path $dxSetup) { Start-Process -FilePath $dxSetup -ArgumentList '/silent' -Wait -NoNewWindow }
+              Write-Host "DirectX runtime installed."
+          } catch { Write-Warning "DirectX skipped: $_" }
+          Write-Host "SA-MP runtime prepared. Game files must be user-provided."
+
+      # ------------------------------------------------------------------
+      # 8. GAME VÀ ỨNG DỤNG
+      # ------------------------------------------------------------------
+      - name: Install selected games and apps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $status = [ordered]@{}
+
+          if ($env:DISCORD -eq 'ya') {
+              try {
+                  winget install --id Discord.Discord --silent --accept-package-agreements --accept-source-agreements | Out-Null
+                  $status['Discord'] = if ($LASTEXITCODE -eq 0) { 'installed_unverified' } else { 'failed' }
+              } catch { $status['Discord'] = 'failed' }
           }
 
-      # ============================================================
-      # 7. GIỮ PHIÊN CHẠY THEO SỐ GIỜ
-      # ============================================================
-      - name: Keep Session Alive
-        shell: powershell
-        run: |
-          $hours = [int]"${{ github.event.inputs.hours }}"
-          $endSession = (Get-Date).AddMinutes($hours * 60)
-          
-          Write-Host "Phiên làm việc sẽ kết thúc lúc: $endSession" -ForegroundColor Yellow
-          
-          while ((Get-Date) -lt $endSession) {
-              $svc = Get-Service -Name "RustDesk" -ErrorAction SilentlyContinue
-              if ($svc -and $svc.Status -ne "Running") {
-                  Start-Service -Name "RustDesk" -ErrorAction SilentlyContinue
-              }
-              Start-Sleep -Seconds 60
+          if ($env:EKSTRA -eq 'ya') {
+              try {
+                  winget install --id 7zip.7zip --silent --accept-package-agreements --accept-source-agreements | Out-Null
+                  $status['7-Zip'] = if ($LASTEXITCODE -eq 0) { 'installed_unverified' } else { 'failed' }
+              } catch { $status['7-Zip'] = 'failed' }
+              try {
+                  winget install --id Google.Chrome --silent --accept-package-agreements --accept-source-agreements | Out-Null
+                  $status['Chrome'] = if ($LASTEXITCODE -eq 0) { 'installed_unverified' } else { 'failed' }
+              } catch { $status['Chrome'] = 'failed' }
+              try {
+                  winget install --id Skillbrains.Lightshot --silent --accept-package-agreements --accept-source-agreements | Out-Null
+                  $status['Lightshot'] = if ($LASTEXITCODE -eq 0) { 'installed_unverified' } else { 'failed' }
+              } catch { $status['Lightshot'] = 'failed' }
           }
-          Write-Host "Hết thời gian thuê. Kết thúc phiên." -ForegroundColor Red
+
+          if ($env:MINECRAFT_JAVA -eq 'ya') {
+              try {
+                  winget install --id Microsoft.OpenJDK.21 --silent --accept-package-agreements --accept-source-agreements | Out-Null
+                  $status['MinecraftJava'] = if ($LASTEXITCODE -eq 0) { 'installer_ready' } else { 'failed' }
+              } catch { $status['MinecraftJava'] = 'failed' }
+          }
+
+          if ($env:MINECRAFT_BEDROCK -eq 'ya') { $status['MinecraftBedrock'] = 'store_required' }
+
+          if ($env:ROBLOX -eq 'ya') {
+              try {
+                  $robloxUrl = 'https://www.roblox.com/download/client?os=win'
+                  $robloxInstaller = Join-Path $env:TEMP_DIR 'RobloxPlayerInstaller.exe'
+                  Invoke-WebRequest -Uri $robloxUrl -OutFile $robloxInstaller -UseBasicParsing -TimeoutSec 300
+                  if ((Get-Item $robloxInstaller).Length -lt 1MB) { throw "Roblox installer too small." }
+                  Start-Process -FilePath $robloxInstaller -ArgumentList '/install', '/silent' -Wait -NoNewWindow
+                  $status['Roblox'] = 'installed_unverified'
+              } catch { $status['Roblox'] = 'failed' }
+          }
+
+          $status | ConvertTo-Json | Out-File -FilePath (Join-Path $env:WORK_DIR 'app_status.json') -Encoding UTF8
+
+      # ------------------------------------------------------------------
+      # 9. WALLPAPER (nếu có)
+      # ------------------------------------------------------------------
+      - name: Apply wallpaper from assets (if exists)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $wpSource = Join-Path $env:GITHUB_WORKSPACE 'assets\wallpaper.jpg'
+          if (-not (Test-Path $wpSource)) { Write-Warning "assets/wallpaper.jpg not found. Skipping."; return }
+          $wpDest = Join-Path $env:WORK_DIR 'wallpaper.jpg'
+          Copy-Item -Path $wpSource -Destination $wpDest -Force
+          $user = $env:RDP_USER
+          $userSid = (Get-LocalUser -Name $user).SID.Value
+          $desktopPath = "Registry::HKEY_USERS\$userSid\Control Panel\Desktop"
+          if (-not (Test-Path $desktopPath)) { New-Item -Path $desktopPath -Force | Out-Null }
+          Set-ItemProperty -Path $desktopPath -Name 'WallPaper' -Value $wpDest -Type String -Force
+          Set-ItemProperty -Path $desktopPath -Name 'WallpaperStyle' -Value '10' -Type String -Force
+          Write-Host "Wallpaper set."
+
+      # ------------------------------------------------------------------
+      # 10. CÔNG BỐ THÔNG TIN ĐĂNG NHẬP RUSTDESK
+      # ------------------------------------------------------------------
+      - name: Publish RustDesk login information
+        shell: pwsh
+        env:
+          SECRET_RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "::add-mask::$env:SECRET_RDP_PASSWORD"
+
+          $idFile = Join-Path $env:WORK_DIR 'rustdesk_id.txt'
+          if (-not (Test-Path $idFile)) { throw "RustDesk ID file not found. Installation may have failed." }
+          $rustdeskId = (Get-Content $idFile -Raw).Trim()
+          if (-not $rustdeskId) { throw "RustDesk ID is empty." }
+
+          $password = $env:SECRET_RDP_PASSWORD
+
+          $summary = @()
+          $summary += "## Layer7 RustDesk Session Ready"
+          $summary += ""
+          $summary += "| Thông tin | Giá trị |"
+          $summary += "|-----------|---------|"
+          $summary += "| **RustDesk ID** | ``$rustdeskId`` |"
+          $summary += "| **Mật khẩu** | ``$password`` |"
+          $summary += "| **Hostname** | ``$env:HOSTNAME`` |"
+          $summary += ""
+          $summary += "### Hướng dẫn kết nối"
+          $summary += "1. Mở ứng dụng **RustDesk** trên máy của bạn."
+          $summary += "2. Nhập **ID** ở trên vào ô ``Remote ID``."
+          $summary += "3. Nhấn **Connect**."
+          $summary += "4. Nhập **mật khẩu** khi được yêu cầu."
+          $summary += ""
+          $summary += "> **Lưu ý:** Mật khẩu này cũng là mật khẩu RDP (``RDP_PASSWORD``). Không chia sẻ công khai."
+          $summary += ""
+          $summary += "*Phiên sẽ tự động kết thúc sau khoảng $env:DUR phút. Hãy lưu lại công việc trước khi hết giờ.*"
+
+          $summary -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+          Write-Host "✅ RustDesk login information published to Summary."
+
+          # In ra log (đã mask mật khẩu)
+          Write-Host "================================================"
+          Write-Host "RUSTDESK ID: $rustdeskId"
+          Write-Host "PASSWORD   : $password"
+          Write-Host "================================================"
+
+      # ------------------------------------------------------------------
+      # 11. KEEPALIVE
+      # ------------------------------------------------------------------
+      - name: Keep session alive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $durationMin = [int]$env:DUR
+          $loopMin = [math]::Max(5, $durationMin - 5)
+          $endTime = (Get-Date).AddMinutes($loopMin)
+          Write-Host "Keepalive started until ~$($endTime.ToString('u'))."
+          while ((Get-Date) -lt $endTime) {
+              $now = Get-Date -Format 'u'
+              $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+              $rdSvc = Get-Service -Name TermService -ErrorAction SilentlyContinue
+              $rdStatus = if ($svc) { $svc.Status } else { 'NotFound' }
+              Write-Host "[$now] RustDesk=$rdStatus RDP=$($rdSvc.Status)"
+              Start-Sleep -Seconds 300
+          }
+          Write-Host "Keepalive period ended."
+
+      # ------------------------------------------------------------------
+      # 12. PERSIST STATE
+      # ------------------------------------------------------------------
+      - name: Persist allowed state
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $zipPath = Join-Path $env:PERSIST_DIR 'layer7-state.zip'
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
+          $user = $env:RDP_USER
+          $allowedPaths = @("C:\Users\$user\Desktop", "C:\Users\$user\Documents", "C:\Users\$user\Downloads")
+          $staging = Join-Path $env:TEMP_DIR 'persist-staging'
+          if (Test-Path $staging) { Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue }
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          foreach ($p in $allowedPaths) {
+              if (Test-Path $p) { Copy-Item -Path $p -Destination (Join-Path $staging (Split-Path $p -Leaf)) -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+          $idFile = Join-Path $env:WORK_DIR 'rustdesk_id.txt'
+          if (Test-Path $idFile) { Copy-Item $idFile -Destination $staging -Force }
+          $statusFile = Join-Path $env:WORK_DIR 'app_status.json'
+          if (Test-Path $statusFile) { Copy-Item $statusFile -Destination $staging -Force }
+          try {
+              Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath -Force -ErrorAction Stop
+              Write-Host "State archive created: $zipPath"
+          } catch { Write-Warning "Failed to create archive: $_" }
+
+      - name: Upload state artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer7-state
+          path: C:\Layer7\persist\layer7-state.zip
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ------------------------------------------------------------------
+      # 13. CLEANUP
+      # ------------------------------------------------------------------
+      - name: Finalize and cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host "--- Cleanup ---"
+          # Không cần ngắt kết nối VPN nữa (không còn Tailscale)
+          Remove-Item (Join-Path $env:TEMP_DIR '*') -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $env:WORK_DIR 'mesa3d') -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleanup done. Persisted state remains at $env:PERSIST_DIR."
