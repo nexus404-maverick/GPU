@@ -68,7 +68,6 @@ jobs:
               Write-Host "Disabling password complexity policy..."
               $seceditFile = "$env:TEMP\secpol.inf"
               
-              # Sử dụng mảng String để tránh lỗi khoảng trắng của Here-String
               $seceditContent = @(
                   "[Unicode]",
                   "Unicode=yes",
@@ -148,18 +147,24 @@ jobs:
           $archive = Join-Path $env:TEMP_DIR 'mesa.7z'
           New-Item -ItemType Directory -Path $mesaDir -Force | Out-Null
 
-          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest' -Headers @{ 'User-Agent' = 'Layer7' }
-          $asset = $release.assets | Where-Object { $_.name -match '^mesa3d-.*-release-msvc\.7z$' } | Select-Object -First 1
-          if (-not $asset) { throw 'Mesa3D package not found.' }
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
+          # Tải trực tiếp bản Mesa3D mới nhất qua link tĩnh
+          Write-Host "Downloading Mesa3D..."
+          Invoke-WebRequest -Uri 'https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z' -OutFile $archive -UseBasicParsing -TimeoutSec 300
 
           $sevenZip = "$env:TEMP_DIR\7zr.exe"
           if (-not (Test-Path $sevenZip)) {
-            Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $sevenZip
+            Write-Host "Downloading 7zr..."
+            Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $sevenZip -UseBasicParsing
           }
 
-          & $sevenZip x $archive "-o$mesaDir" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to extract Mesa3D.' }
+          # Dùng Start-Process để tránh lỗi crash DLL của PowerShell
+          Write-Host "Extracting Mesa3D..."
+          $process = Start-Process -FilePath $sevenZip -ArgumentList "x `"$archive`" `"-o$mesaDir`" -y" -Wait -PassThru -NoNewWindow
+          
+          if ($process.ExitCode -ne 0) { throw 'Failed to extract Mesa3D.' }
+          
+          $dlls = Get-ChildItem -Path $mesaDir -Filter 'opengl32.dll' -Recurse -ErrorAction SilentlyContinue
+          if (-not $dlls) { throw 'Mesa3D DLL not found.' }
           "MESA3D_DIR=$mesaDir" >> $env:GITHUB_ENV
 
       - name: Optimize storage and set Dark Mode
