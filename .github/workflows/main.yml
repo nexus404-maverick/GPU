@@ -200,7 +200,7 @@ jobs:
           Write-Host "Init and RDP fallback ready."
 
       # ------------------------------------------------------------------
-      # 3. CÀI ĐẶT VÀ CẤU HÌNH RUSTDESK
+      # 3. CÀI ĐẶT VÀ CẤU HÌNH RUSTDESK (ĐÃ SỬA LỖI YAML TẠI ĐÂY)
       # ------------------------------------------------------------------
       - name: Install and configure RustDesk
         shell: pwsh
@@ -245,7 +245,6 @@ jobs:
           if (-not (Test-Path $rustdeskExe)) { throw "rustdesk.exe not found." }
           Write-Host "RustDesk executable found at: $rustdeskExe"
 
-          # --- Phương pháp mới: Cấu hình qua file TOML thay vì CLI (tránh treo) ---
           Write-Host "Configuring RustDesk via config file..."
           
           $svcName = 'RustDesk'
@@ -260,12 +259,14 @@ jobs:
           if (-not (Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force | Out-Null }
           
           $tomlPath = Join-Path $configDir 'RustDesk.toml'
-          $tomlContent = @"
-id = ''
-password = '$env:SECRET_RDP_PASSWORD'
-salt = ''
-"@
-          $tomlContent | Out-File -FilePath $tomlPath -Encoding UTF8 -Force
+          
+          # Sử dụng mảng chuỗi thay vì Here-String để tránh lỗi cú pháp YAML
+          $tomlLines = @(
+              "id = ''"
+              "password = '$($env:SECRET_RDP_PASSWORD)'"
+              "salt = ''"
+          )
+          $tomlLines | Out-File -FilePath $tomlPath -Encoding UTF8 -Force
           Write-Host "RustDesk.toml has been written with the permanent password."
 
           if (-not $svc) {
