@@ -36,7 +36,7 @@ jobs:
           "WORK_DIR=$work" >> $env:GITHUB_ENV
           "TEMP_DIR=$temp" >> $env:GITHUB_ENV
 
-      - name: Generate Windows account password
+      - name: Generate Passwords
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -49,7 +49,6 @@ jobs:
             $lower[(Get-Random -Maximum $lower.Length)]
             $digits[(Get-Random -Maximum $digits.Length)]
           )
-          
           $allChars = $upper + $lower + $digits
           for ($i = 0; $i -lt 10; $i++) {
               $pass += $allChars[(Get-Random -Maximum $allChars.Length)]
@@ -58,25 +57,19 @@ jobs:
           
           "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
           "RDP_USERNAME=Layer7Store" >> $env:GITHUB_ENV
+          # VNC chỉ hỗ trợ tối đa 8 ký tự
+          "VNC_PASSWORD=$($password.Substring(0,8))" >> $env:GITHUB_ENV
 
-      - name: Setup Windows account and RDP
+      - name: Setup Windows account
         shell: powershell
         run: |
           try {
-              Write-Host "Disabling password complexity policy..."
               $seceditFile = "$env:TEMP\secpol.inf"
-              $seceditContent = @(
-                  "[Unicode]", "Unicode=yes", "[System Access]",
-                  "PasswordComplexity = 0", "MinimumPasswordLength = 0"
-              )
+              $seceditContent = @("[Unicode]", "Unicode=yes", "[System Access]", "PasswordComplexity = 0", "MinimumPasswordLength = 0")
               Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
               $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
               Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
               
-              Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction SilentlyContinue
-              Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -ErrorAction SilentlyContinue
-              Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
-
               $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
               $user = Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue
               if ($null -eq $user) {
@@ -84,81 +77,74 @@ jobs:
               } else {
                 Set-LocalUser -Name $env:RDP_USERNAME -Password $secure -ErrorAction SilentlyContinue
               }
-              
-              Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
               Add-LocalGroupMember -Group 'Administrators' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
-              
-              Set-Service -Name TermService -StartupType Automatic -ErrorAction SilentlyContinue
-              Start-Service -Name TermService -ErrorAction SilentlyContinue
-          } catch {
-              Write-Host "Warning during setup: $_"
-          }
+          } catch { Write-Host "Warning: $_" }
           exit 0
 
-      - name: Install and Configure TightVNC
+      - name: Download TightVNC
         shell: powershell
-        timeout-minutes: 10
+        timeout-minutes: 3
         run: |
           $ErrorActionPreference = 'Stop'
-          $vncInstaller = "$env:TEMP_DIR\tightvnc.msi"
-          
           Write-Host "Downloading TightVNC..."
-          Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.84/tightvnc-2.8.84-gpl-setup-64bit.msi" -OutFile $vncInstaller -UseBasicParsing
-          
-          Write-Host "Installing TightVNC silently..."
-          $p = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$vncInstaller`" /qn /norestart" -Wait -PassThru
-          if ($p.ExitCode -notin @(0, 1641, 3010)) {
-              throw "TightVNC installation failed with exit code $($p.ExitCode)."
-          }
+          Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.84/tightvnc-2.8.84-gpl-setup-64bit.msi" -OutFile "$env:TEMP_DIR\tightvnc.msi" -UseBasicParsing
 
+      - name: Install TightVNC silently
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "Installing TightVNC..."
+          $p = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$env:TEMP_DIR\tightvnc.msi`" /qn /norestart" -Wait -PassThru
+          if ($p.ExitCode -notin @(0, 1641, 3010)) { throw "TightVNC install failed: $($p.ExitCode)" }
+          Write-Host "Install finished."
+
+      - name: Configure and Start TightVNC
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference = 'Continue'
           $vncExe = "C:\Program Files\TightVNC\tvnserver.exe"
-          if (-not (Test-Path $vncExe)) {
-              throw "tvnserver.exe not found."
-          }
+          if (-not (Test-Path $vncExe)) { throw "tvnserver.exe not found." }
 
           Write-Host "Setting VNC password..."
-          # Mật khẩu VNC chỉ hỗ trợ tối đa 8 ký tự
-          $vncPass = $env:GENERATED_PASSWORD.Substring(0,8)
-          "VNC_PASSWORD=$vncPass" >> $env:GITHUB_ENV
-          
-          # Cấu hình VNC chạy dưới dạng Service
-          Start-Process -FilePath $vncExe -ArgumentList "-controlservice -passwd `"$vncPass`"" -Wait -NoNewWindow
-          Start-Process -FilePath $vncExe -ArgumentList "-controlservice -start" -Wait -NoNewWindow
-          
-          Write-Host "Opening VNC Port (5900) on Firewall..."
-          New-NetFirewallRule -DisplayName 'VNC TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5900 -ErrorAction SilentlyContinue | Out-Null
-          
+          # Sử dụng timeout 10s để tránh bị treo vô hạn
+          $proc = Start-Process -FilePath $vncExe -ArgumentList "-controlservice -passwd `"$env:VNC_PASSWORD`"" -PassThru -NoNewWindow
+          if (-not $proc.WaitForExit(10000)) {
+              Write-Host "VNC password process timed out, killing it..."
+              $proc.Kill()
+          }
+
+          Write-Host "Starting VNC Service..."
+          Start-Service -Name "tvnserver" -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 5
+
+          Write-Host "Opening Firewall Port 5900..."
+          New-NetFirewallRule -DisplayName 'VNC TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5900 -ErrorAction SilentlyContinue | Out-Null
 
       - name: Setup Bore Tunnel for VNC
         shell: powershell
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
-          $boreZip = "$env:TEMP_DIR\bore.zip"
-          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.5.3/bore-v0.5.3-x86_64-pc-windows-msvc.zip" -OutFile $boreZip -UseBasicParsing
+          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.5.3/bore-v0.5.3-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP_DIR\bore.zip" -UseBasicParsing
+          Expand-Archive -Path "$env:TEMP_DIR\bore.zip" -DestinationPath "$env:TEMP_DIR\bore" -Force
           
-          Expand-Archive -Path $boreZip -DestinationPath "$env:TEMP_DIR\bore" -Force
           $boreExe = "$env:TEMP_DIR\bore\bore.exe"
+          $boreLog = "$env:TEMP_DIR\bore.log"
           
           Write-Host "Starting Bore tunnel for VNC (port 5900)..."
-          $boreLog = "$env:TEMP_DIR\bore.log"
-          # Trỏ Bore vào cổng 5900 của VNC
           Start-Process -FilePath $boreExe -ArgumentList "local 5900 --to bore.pub" -WindowStyle Hidden -RedirectStandardOutput $boreLog
           
           Start-Sleep -Seconds 15
-
           $publicAddress = $null
           if (Test-Path $boreLog) {
               $logContent = Get-Content $boreLog -Raw
-              if ($logContent -match 'listening at (bore\.pub:\d+)') {
-                  $publicAddress = $matches[1]
-              }
+              if ($logContent -match 'listening at (bore\.pub:\d+)') { $publicAddress = $matches[1] }
           }
-          
           if (-not $publicAddress) { throw 'Failed to get Bore public address.' }
           
-          Write-Host "VNC Address obtained: $publicAddress"
+          Write-Host "VNC Address: $publicAddress"
           "BORE_ADDRESS=$publicAddress" >> $env:GITHUB_ENV
 
       - name: Publish Connection Information
@@ -180,11 +166,7 @@ jobs:
 
           if (-not [string]::IsNullOrWhiteSpace($env:PHONE_SERVER_URL)) {
             $url = "$($env:PHONE_SERVER_URL.TrimEnd('/'))/api/provision/$nodeId"
-            $body = @{ 
-                remote_id = $env:BORE_ADDRESS
-                password = $env:VNC_PASSWORD
-                type = "vnc" 
-            } | ConvertTo-Json
+            $body = @{ remote_id = $env:BORE_ADDRESS; password = $env:VNC_PASSWORD; type = "vnc" } | ConvertTo-Json
             try {
               Invoke-RestMethod -Uri $url -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 30 | Out-Null
               Write-Host 'Successfully sent VNC info to Server.'
@@ -204,16 +186,12 @@ jobs:
           Write-Host "Session ends at: $end"
           
           while ((Get-Date) -lt $end) {
-            # Đảm bảo Bore và VNC luôn chạy
             $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
             if (-not $boreProc) {
                 Start-Process -FilePath "$env:TEMP_DIR\bore\bore.exe" -ArgumentList "local 5900 --to bore.pub" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP_DIR\bore.log"
             }
-            
             $vncSvc = Get-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-            if ($vncSvc -and $vncSvc.Status -ne 'Running') {
-              Start-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-            }
+            if ($vncSvc -and $vncSvc.Status -ne 'Running') { Start-Service -Name "tvnserver" -ErrorAction SilentlyContinue }
             
             $remain = $end - (Get-Date)
             Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
