@@ -3,65 +3,60 @@ name: Layer7 RDP Windows Server 2025
 on:
   workflow_dispatch:
     inputs:
-      instance_number:
-        description: 'Mã đơn hàng (VD: ORD-123) - Dùng để gửi Webhook'
-        required: false
-        default: 'ORD-001'
-        type: string
       durasi_menit:
         description: 'Thời lượng phiên (phút), 10-360'
-        required: false
+        required: true
         default: '360'
         type: string
       hostname:
         description: 'Hostname (chỉ chữ, số, dấu gạch nối)'
-        required: false
-        default: 'rdpfree'
+        required: true
+        default: 'layer7-pc'
         type: string
       rdp_user:
-        description: 'Tên tài khoản RDP (3-20 ký tự)'
-        required: false
+        description: 'Tên tài khoản Windows/RDP (3-20 ký tự)'
+        required: true
         default: 'xyadmin'
         type: string
       storage_boost:
-        required: false
+        description: 'Dọn file tạm và cache an toàn'
+        required: true
         default: 'ya'
         type: choice
         options: [ya, tidak]
       debloat:
-        required: false
+        description: 'Mức tối ưu Windows'
+        required: true
         default: 'ringan'
         type: choice
         options: [ringan, full, tidak]
-      win10:
-        required: false
+      dark_mode:
+        description: 'Bật giao diện tối'
+        required: true
         default: 'ya'
         type: choice
         options: [ya, tidak]
-      ekstra:
-        required: false
-        default: 'ya'
-        type: choice
-        options: [ya, tidak]
-      grafis:
-        required: false
-        default: 'software'
-        type: choice
-        options: [software, tidak]
       microphone:
-        required: false
+        description: 'Cho phép chính sách âm thanh/micro RDP'
+        required: true
+        default: 'ya'
+        type: choice
+        options: [ya, tidak]
+      extras:
+        description: 'Cài 7-Zip, Chrome và Lightshot'
+        required: true
         default: 'ya'
         type: choice
         options: [ya, tidak]
       discord:
-        required: false
+        description: 'Cài Discord'
+        required: true
         default: 'tidak'
         type: choice
         options: [ya, tidak]
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: layer7-windows-2025-rdp
@@ -69,448 +64,409 @@ concurrency:
 
 env:
   DUR: ${{ inputs.durasi_menit || '360' }}
-  HOSTNAME: ${{ inputs.hostname || 'rdpfree' }}
+  LAYER7_HOSTNAME: ${{ inputs.hostname || 'layer7-pc' }}
   RDP_USER: ${{ inputs.rdp_user || 'xyadmin' }}
   STORAGE_BOOST: ${{ inputs.storage_boost || 'ya' }}
   DEBLOAT: ${{ inputs.debloat || 'ringan' }}
-  WIN10: ${{ inputs.win10 || 'ya' }}
-  EKSTRA: ${{ inputs.ekstra || 'ya' }}
-  GRAFIS: ${{ inputs.grafis || 'software' }}
+  DARK_MODE: ${{ inputs.dark_mode || 'ya' }}
   MICROPHONE: ${{ inputs.microphone || 'ya' }}
+  EXTRAS: ${{ inputs.extras || 'ya' }}
   DISCORD: ${{ inputs.discord || 'tidak' }}
   WORK_DIR: 'C:\Layer7'
   PERSIST_DIR: 'C:\Layer7\persist'
   TEMP_DIR: 'C:\Layer7\temp'
+  MESA_DIR: 'C:\Layer7\mesa3d'
 
 jobs:
   rdp:
-    name: Layer7 Windows Server 2025
+    name: Layer7 Windows Server 2025 + Mesa3D
     runs-on: windows-2025
     timeout-minutes: 360
 
     steps:
-      # ------------------------------------------------------------------
-      # 1. XÁC THỰC INPUT VÀ SECRET (TẠO PASS NGẪU NHIÊN NẾU CẦN)
-      # ------------------------------------------------------------------
+      # 1. Validate input and secret.
       - name: Validate inputs and secrets
         shell: pwsh
         env:
           SECRET_RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
-          
-          # Nếu secret bị trống, tự động tạo mật khẩu ngẫu nhiên
           if ([string]::IsNullOrWhiteSpace($env:SECRET_RDP_PASSWORD)) {
-              Write-Host "Secret RDP_PASSWORD is empty. Generating random password..."
-              $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$"
-              $password = -join (1..16 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-              echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-              $env:SECRET_RDP_PASSWORD = $password
-          } else {
-              Write-Host "Using RDP_PASSWORD from secrets."
+            throw 'Missing repository secret RDP_PASSWORD. Set it in Settings > Secrets and variables > Actions.'
           }
-
-          Write-Host "::add-mask::$env:SECRET_RDP_PASSWORD"
-
-          if ($env:DUR -notmatch '^\d+$') { throw "durasi_menit must be numeric." }
-          $durInt = [int]$env:DUR
-          if ($durInt -lt 10 -or $durInt -gt 360) { throw "durasi_menit must be 10-360." }
-
-          if ($env:HOSTNAME -notmatch '^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,13}[a-zA-Z0-9])?$') {
-              throw "hostname contains invalid characters."
+          if ($env:DUR -notmatch '^\d+$') { throw 'durasi_menit must be numeric.' }
+          $duration = [int]$env:DUR
+          if ($duration -lt 10 -or $duration -gt 360) { throw 'durasi_menit must be between 10 and 360.' }
+          if ($env:LAYER7_HOSTNAME -notmatch '^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,13}[a-zA-Z0-9])?$') {
+            throw 'hostname contains invalid characters or is too long.'
           }
-          if ($env:RDP_USER.Length -lt 3 -or $env:RDP_USER.Length -gt 20) {
-              throw "rdp_user must be 3-20 characters."
+          if ($env:RDP_USER -notmatch '^[a-zA-Z0-9_.-]{3,20}$') {
+            throw 'rdp_user must be 3-20 characters and use only letters, numbers, _, . or -.'
           }
+          foreach ($pair in @(
+            @{Name='STORAGE_BOOST'; Values=@('ya','tidak')},
+            @{Name='DEBLOAT'; Values=@('ringan','full','tidak')},
+            @{Name='DARK_MODE'; Values=@('ya','tidak')},
+            @{Name='MICROPHONE'; Values=@('ya','tidak')},
+            @{Name='EXTRAS'; Values=@('ya','tidak')},
+            @{Name='DISCORD'; Values=@('ya','tidak')}
+          )) {
+            $value = [Environment]::GetEnvironmentVariable($pair.Name)
+            if ($pair.Values -notcontains $value) { throw "Invalid value for $($pair.Name): $value" }
+          }
+          Write-Host 'Input validation passed. Password will not be printed to logs or Summary.'
 
-          Write-Host "Input validation passed."
-
-      # ------------------------------------------------------------------
-      # 2. KHỞI TẠO VÀ THIẾT LẬP RDP (CẤP QUYỀN ADMIN)
-      # ------------------------------------------------------------------
-      - name: Checkout repository
+      # 2. Checkout only wallpaper assets to reduce checkout overhead.
+      - name: Checkout assets
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
             assets
           sparse-checkout-cone-mode: false
 
-      - name: Init directories and Setup RDP
+      - name: Initialize directories and show runner information
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          
-          # Khởi tạo thư mục
-          foreach ($d in @($env:WORK_DIR, $env:PERSIST_DIR, $env:TEMP_DIR)) {
-              if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+          foreach ($path in @($env:WORK_DIR, $env:PERSIST_DIR, $env:TEMP_DIR)) {
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
           }
+          (Get-Date).ToUniversalTime().ToString('o') | Set-Content -LiteralPath (Join-Path $env:WORK_DIR 'session-start.utc') -Encoding ascii
+          try {
+            Rename-Computer -NewName $env:LAYER7_HOSTNAME -Force -ErrorAction Stop
+            Write-Host "Hostname change requested: $env:LAYER7_HOSTNAME (Windows may require a restart to fully apply)."
+          } catch {
+            Write-Warning "Could not change hostname in this runner: $_"
+          }
+          Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber, CsTotalPhysicalMemory | Format-List
+          Get-PSDrive -Name C | Select-Object Name, Used, Free | Format-List
 
-          $user = $env:RDP_USER
-          $pass = $env:SECRET_RDP_PASSWORD
-
-          $existing = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
-          if (-not $existing) {
-              $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
-              New-LocalUser -Name $user -Password $securePass -PasswordNeverExpires -AccountNeverExpires -FullName "Layer7 User" | Out-Null
+      # 3. Windows/RDP account setup. RustDesk remains the primary remote access method.
+      - name: Setup Windows account and RDP fallback
+        shell: pwsh
+        env:
+          SECRET_RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $securePassword = ConvertTo-SecureString $env:SECRET_RDP_PASSWORD -AsPlainText -Force
+          $existing = Get-LocalUser -Name $env:RDP_USER -ErrorAction SilentlyContinue
+          if ($existing) {
+            Set-LocalUser -Name $env:RDP_USER -Password $securePassword
           } else {
-              $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
-              Set-LocalUser -Name $user -Password $securePass
+            New-LocalUser -Name $env:RDP_USER -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -Description 'Layer7 remote desktop account' | Out-Null
           }
-
-          # Cấp quyền
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-
-          # Bật RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -Type DWord -Force
-          New-NetFirewallRule -DisplayName "Layer7-RDP-Fallback" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          $administrators = Get-LocalGroup -SID 'S-1-5-32-544'
+          $adminMembers = Get-LocalGroupMember -Group $administrators.Name -ErrorAction SilentlyContinue
+          if (-not ($adminMembers | Where-Object { $_.Name -match "\\$([regex]::Escape($env:RDP_USER))$" })) {
+            Add-LocalGroupMember -Group $administrators.Name -Member $env:RDP_USER -ErrorAction SilentlyContinue
+          }
+          $rdpGroup = Get-LocalGroup -SID 'S-1-5-32-555' -ErrorAction SilentlyContinue
+          if ($rdpGroup) {
+            $members = Get-LocalGroupMember -Group $rdpGroup.Name -ErrorAction SilentlyContinue
+            if (-not ($members | Where-Object { $_.Name -match "\\$([regex]::Escape($env:RDP_USER))$" })) {
+              Add-LocalGroupMember -Group $rdpGroup.Name -Member $env:RDP_USER -ErrorAction SilentlyContinue
+            }
+          }
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Type DWord
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -Type DWord
           Set-Service -Name TermService -StartupType Automatic
           Start-Service -Name TermService -ErrorAction SilentlyContinue
-          Write-Host "Init and RDP fallback ready."
+          # Keep the RDP fallback available. Use a strong RDP_PASSWORD secret and do not publish it publicly.
+          Remove-NetFirewallRule -DisplayName 'Layer7-RDP-Fallback' -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName 'Layer7-RDP-Fallback' -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -Profile Any | Out-Null
+          Write-Host "Windows account '$env:RDP_USER' configured; Network Level Authentication is enabled."
 
-      # ------------------------------------------------------------------
-      # 3. CÀI ĐẶT VÀ CẤU HÌNH RUSTDESK (LẤY ID 3 LỚP)
-      # ------------------------------------------------------------------
+      # 4. RustDesk installation and ID retrieval.
       - name: Install and configure RustDesk
+        shell: pwsh
+        env:
+          SECRET_RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest' -Headers @{ 'User-Agent'='Layer7-Workflow' } -TimeoutSec 60
+          $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[0-9.]+-x86_64\.exe$' } | Select-Object -First 1
+          if (-not $asset) { $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[0-9.]+-x86_64\.msi$' } | Select-Object -First 1 }
+          if (-not $asset) { throw 'Could not find a Windows x86_64 RustDesk installer in the latest release.' }
+          $installer = Join-Path $env:TEMP_DIR $asset.name
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installer -TimeoutSec 300
+          if ((Get-Item $installer).Length -lt 1MB) { throw 'RustDesk installer is unexpectedly small.' }
+          if ($installer -match '\.msi$') {
+            $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', "`"$installer`"", '/quiet', '/norestart') -Wait -PassThru -NoNewWindow
+          } else {
+            $proc = Start-Process -FilePath $installer -ArgumentList '--silent-install' -Wait -PassThru -NoNewWindow
+          }
+          if ($proc.ExitCode -ne 0) { throw "RustDesk installer failed with exit code $($proc.ExitCode)." }
+          $rustdeskExe = Join-Path $env:ProgramFiles 'RustDesk\rustdesk.exe'
+          if (-not (Test-Path $rustdeskExe)) {
+            $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ -and (Test-Path $_) }
+            $found = Get-ChildItem -Path $roots -Filter 'rustdesk.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $rustdeskExe = $found.FullName }
+          }
+          if (-not (Test-Path $rustdeskExe)) { throw 'rustdesk.exe was not found after installation.' }
+          $service = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+          if (-not $service) { & $rustdeskExe --install-service 2>&1 | ForEach-Object { Write-Host $_ } }
+          Start-Sleep -Seconds 3
+          Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
+          Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+          # The password is intentionally never echoed or added to the job Summary.
+          & $rustdeskExe --password "$env:SECRET_RDP_PASSWORD" 2>&1 | ForEach-Object { Write-Host $_ }
+          Start-Sleep -Seconds 3
+          $rustdeskId = $null
+          for ($i = 0; $i -lt 12; $i++) {
+            $output = & $rustdeskExe --get-id 2>$null
+            if ($output) {
+              $candidate = ($output | Select-Object -First 1).ToString().Trim()
+              if ($candidate -match '^\d+$') { $rustdeskId = $candidate; break }
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $rustdeskId) { throw 'RustDesk was installed but a valid RustDesk ID could not be read.' }
+          $rustdeskId | Out-File -FilePath (Join-Path $env:WORK_DIR 'rustdesk_id.txt') -Encoding ascii -NoNewline
+          Remove-NetFirewallRule -DisplayName 'Layer7-RustDesk-TCP' -ErrorAction SilentlyContinue
+          Remove-NetFirewallRule -DisplayName 'Layer7-RustDesk-UDP' -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName 'Layer7-RustDesk-TCP' -Direction Inbound -Protocol TCP -LocalPort 21115-21119 -Action Allow -Profile Any | Out-Null
+          New-NetFirewallRule -DisplayName 'Layer7-RustDesk-UDP' -Direction Inbound -Protocol UDP -LocalPort 21116 -Action Allow -Profile Any | Out-Null
+          Write-Host "RustDesk is configured. RustDesk ID: $rustdeskId"
+          "RustDesk ID: $rustdeskId" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          'The connection password is the repository secret RDP_PASSWORD; it is intentionally not displayed here.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      # 5. Mesa3D is REQUIRED. Do not make this optional and do not remove $env:MESA_DIR in cleanup.
+      # The extracted package is retained for the entire runner session at C:\Layer7\mesa3d.
+      - name: Download, extract and validate Mesa3D package (REQUIRED)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          
-          Write-Host "--- Fetching latest RustDesk release ---"
-          $releaseApi = 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest'
-          $release = Invoke-RestMethod -Uri $releaseApi -Headers @{ 'User-Agent' = 'Layer7-Workflow' } -TimeoutSec 60
-          
-          $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[\d\.]+-x86_64\.msi$' } | Select-Object -First 1
-          if (-not $asset) {
-              $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[\d\.]+-x86_64\.exe$' } | Select-Object -First 1
+          Write-Host '=== REQUIRED COMPONENT: Mesa3D ==='
+          $releaseApi = 'https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest'
+          $mesaRelease = Invoke-RestMethod -Uri $releaseApi -Headers @{ 'User-Agent'='Layer7-Workflow' } -TimeoutSec 60
+          $mesaAsset = $mesaRelease.assets | Where-Object { $_.name -match '(?i)release-msvc\.7z$' -and $_.name -match '(?i)^mesa3d-' } | Select-Object -First 1
+          if (-not $mesaAsset) {
+            $available = ($mesaRelease.assets | ForEach-Object { $_.name }) -join ', '
+            throw "Could not find the official MSVC Mesa3D .7z asset in release $($mesaRelease.tag_name). Assets: $available"
           }
-          if (-not $asset) { throw "Could not find RustDesk Windows x86_64 asset." }
-
-          $downloadUrl = $asset.browser_download_url
-          $installerPath = Join-Path $env:TEMP_DIR $asset.name
-          Write-Host "Downloading $($asset.name)..."
-          Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath -UseBasicParsing -TimeoutSec 300
-          if ((Get-Item $installerPath).Length -lt 1MB) { throw "RustDesk installer appears too small." }
-
-          Write-Host "Installing RustDesk..."
-          if ($installerPath -match '\.msi$') {
-              $proc = Start-Process msiexec.exe -ArgumentList @('/i', "`"$installerPath`"", '/quiet', '/norestart') -Wait -PassThru -NoNewWindow
-              if ($proc.ExitCode -ne 0) { throw "RustDesk MSI failed: $($proc.ExitCode)" }
-          } else {
-              $proc = Start-Process -FilePath $installerPath -ArgumentList '--silent-install' -Wait -PassThru -NoNewWindow
-              if ($proc.ExitCode -ne 0) { throw "RustDesk EXE failed: $($proc.ExitCode)" }
+          New-Item -ItemType Directory -Path $env:MESA_DIR -Force | Out-Null
+          $mesaArchive = Join-Path $env:TEMP_DIR $mesaAsset.name
+          Write-Host "Mesa3D release: $($mesaRelease.tag_name)"
+          Write-Host "Downloading official asset: $($mesaAsset.name)"
+          Invoke-WebRequest -Uri $mesaAsset.browser_download_url -OutFile $mesaArchive -TimeoutSec 600
+          if (-not (Test-Path $mesaArchive) -or (Get-Item $mesaArchive).Length -lt 10MB) {
+            throw 'Mesa3D archive is missing or unexpectedly small; setup must not continue without Mesa3D.'
           }
-          Write-Host "RustDesk installed."
-
-          $rustdeskExe = Join-Path $env:ProgramFiles 'RustDesk\rustdesk.exe'
-          if (-not (Test-Path $rustdeskExe)) {
-              $found = Get-ChildItem -Path $env:ProgramFiles, ${env:ProgramFiles(x86)} -Filter 'rustdesk.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($found) { $rustdeskExe = $found.FullName }
+          $sevenZipCandidates = @(
+            (Get-Command '7z.exe' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+            "$env:ProgramFiles\7-Zip\7z.exe",
+            "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          if (-not $sevenZipCandidates) {
+            $winget = Get-Command 'winget.exe' -ErrorAction SilentlyContinue
+            if (-not $winget) { throw '7-Zip is unavailable and winget.exe was not found; refusing to skip Mesa3D extraction.' }
+            & $winget.Source install --id 7zip.7zip --exact --silent --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) { throw "7-Zip installation failed with exit code $LASTEXITCODE." }
+            $sevenZipCandidates = @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") | Where-Object { Test-Path $_ }
           }
-          if (-not (Test-Path $rustdeskExe)) { throw "rustdesk.exe not found." }
-
-          # Đặt mật khẩu qua CLI trước (cách nhanh nhất)
-          Write-Host "Setting RustDesk password..."
-          & $rustdeskExe --password "$env:SECRET_RDP_PASSWORD" 2>&1 | Out-Null
-          Start-Sleep -Seconds 5
-
-          # Đảm bảo Service đang chạy
-          & $rustdeskExe --install-service 2>&1 | Out-Null
-          Start-Sleep -Seconds 3
-          Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-          
-          # Khởi chạy ẩn để ép tạo ID
-          Start-Process -FilePath $rustdeskExe -WindowStyle Hidden -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 10
-
-          Write-Host "Retrieving RustDesk ID (3-layer method)..."
-          $rustdeskId = $null
-
-          # Lớp 1: CLI
-          for ($i = 1; $i -le 5; $i++) {
-              try {
-                  $output = & $rustdeskExe --get-id 2>&1 | Out-String
-                  if ($output -match "(\d{9,10})") { $rustdeskId = $matches[1]; break }
-              } catch {}
-              Start-Sleep -Seconds 3
+          if (-not $sevenZipCandidates) { throw '7z.exe could not be found after the 7-Zip installation attempt.' }
+          $sevenZipExe = $sevenZipCandidates[0]
+          & $sevenZipExe x $mesaArchive "-o$env:MESA_DIR" -y
+          if ($LASTEXITCODE -ne 0) { throw "Mesa3D archive extraction failed with exit code $LASTEXITCODE." }
+          # Verify key 64-bit OpenGL files were extracted instead of treating extraction alone as success.
+          $mesaDll = Get-ChildItem -LiteralPath $env:MESA_DIR -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -in @('opengl32.dll','libgallium_wgl.dll') -and $_.FullName -match '(?i)\\x64\\' } |
+            Select-Object -First 1
+          if (-not $mesaDll) {
+            $mesaTree = Get-ChildItem -LiteralPath $env:MESA_DIR -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -in @('opengl32.dll','libgallium_wgl.dll') } | Select-Object -First 10 -ExpandProperty FullName
+            throw "Mesa3D archive extracted but a 64-bit desktop OpenGL bundle was not found. Found: $($mesaTree -join '; ')"
           }
+          # Keep the distribution folder available and expose its location for later app-specific configuration.
+          [Environment]::SetEnvironmentVariable('MESA3D_DIR', $env:MESA_DIR, 'Machine')
+          "MESA3D_DIR=$env:MESA_DIR" | Out-File -FilePath (Join-Path $env:WORK_DIR 'mesa3d-info.txt') -Encoding utf8
+          "Mesa3D $($mesaRelease.tag_name) downloaded and extracted. OpenGL bundle verified at: $($mesaDll.FullName)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Write-Host "Mesa3D is present and validated: $($mesaDll.FullName)"
+          Write-Host 'IMPORTANT: the official package is retained in C:\Layer7\mesa3d for this runner session.'
 
-          # Lớp 2: Đọc file TOML
-          if (-not $rustdeskId) {
-              Write-Host "CLI failed, checking TOML config..."
-              $configPaths = @(
-                  "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-                  "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml"
-              )
-              foreach ($path in $configPaths) {
-                  if (Test-Path $path) {
-                      $content = Get-Content $path -Raw -ErrorAction SilentlyContinue
-                      if ($content -match 'id\s*=\s*''(\d+)''') { $rustdeskId = $matches[1]; break }
-                      if ($content -match 'id\s*=\s*"(\d+)"') { $rustdeskId = $matches[1]; break }
-                  }
-              }
-          }
-
-          # Lớp 3: Đọc từ Registry
-          if (-not $rustdeskId) {
-              Write-Host "TOML failed, checking Registry..."
-              $regPaths = @("HKLM:\SOFTWARE\RustDesk", "HKCU:\SOFTWARE\RustDesk")
-              foreach ($reg in $regPaths) {
-                  if (Test-Path $reg) {
-                      $id = (Get-ItemProperty -Path $reg -Name "ID" -ErrorAction SilentlyContinue).ID
-                      if ($id) { $rustdeskId = $id; break }
-                  }
-              }
-          }
-
-          if (-not $rustdeskId) { throw "Could not retrieve RustDesk ID after trying all methods." }
-          
-          $rustdeskId | Out-File -FilePath (Join-Path $env:WORK_DIR 'rustdesk_id.txt') -Encoding ASCII -NoNewline
-          echo "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
-          Write-Host "RustDesk ID obtained: $rustdeskId"
-
-      # ------------------------------------------------------------------
-      # 4. DỌN DẸP DESKTOP VÀ TỐI ƯU HỆ THỐNG
-      # ------------------------------------------------------------------
-      - name: Clean Desktop Icons
-        shell: pwsh
-        run: |
-          Write-Host "Cleaning desktop icons..."
-          $user = $env:RDP_USER
-          
-          Remove-Item -Path "C:\Users\Public\Desktop\*" -Include *.lnk, *.url -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Users\$user\Desktop\*" -Include *.lnk, *.url -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Users\runneradmin\Desktop\*" -Include *.lnk, *.url -Force -ErrorAction SilentlyContinue
-
-          $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
-          if (-not (Test-Path $RegPath)) { New-Item -Path $RegPath -Force | Out-Null }
-
-          $HideIcons = @(
-              "{645FF040-5081-101B-9F08-00AA002F954E}", # Recycle Bin
-              "{20D04FE0-3AEA-1069-A2D8-08002B30309D}", # This PC
-              "{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}", # Network
-              "{59031a47-3f72-44a7-89c5-5595fe6b30ee}", # User Files
-              "{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}"  # Control Panel
-          )
-          foreach ($GUID in $HideIcons) {
-              Set-ItemProperty -Path $RegPath -Name $GUID -Value 1 -Type DWord -Force
-          }
-          Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-          Write-Host "Desktop cleaned."
-
+      # 6. Storage optimization and conservative debloat (no game-related software).
       - name: Optimize storage and debloat
         if: env.STORAGE_BOOST == 'ya' || env.DEBLOAT != 'tidak'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
           if ($env:STORAGE_BOOST -eq 'ya') {
-              $safePaths = @("$env:LOCALAPPDATA\Temp\*", "$env:TEMP\*", "C:\Windows\Temp\*")
-              foreach ($p in $safePaths) {
-                  if (Test-Path $p) { try { Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
-              }
-              Write-Host "Storage boost done."
+            $safePaths = @(
+              "$env:LOCALAPPDATA\Temp\*",
+              "$env:TEMP\*",
+              'C:\Windows\Temp\*',
+              "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db"
+            )
+            foreach ($path in $safePaths) {
+              try { Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            Write-Host 'Temporary-file cleanup complete.'
           }
           if ($env:DEBLOAT -eq 'ringan') {
-              Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Force -ErrorAction SilentlyContinue | Out-Null
+            Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Write-Host 'Light Windows policy tuning complete.'
           } elseif ($env:DEBLOAT -eq 'full') {
-              $bloatApps = @('Microsoft.BingWeather','Microsoft.BingNews','Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.MicrosoftSolitaireCollection','Microsoft.People','Microsoft.WindowsFeedbackHub','Microsoft.XboxApp')
-              foreach ($app in $bloatApps) {
-                  $pkg = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
-                  if ($pkg) { try { Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop } catch {} }
-              }
+            $bloatApps = @('Microsoft.BingWeather','Microsoft.BingNews','Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.MicrosoftSolitaireCollection','Microsoft.People','Microsoft.WindowsFeedbackHub')
+            foreach ($app in $bloatApps) {
+              Get-AppxPackage -Name $app -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue
+            }
+            Write-Host 'Conservative app cleanup complete.'
           }
 
-      - name: Configure UI and Audio
-        if: env.WIN10 == 'ya' || env.MICROPHONE == 'ya'
+      - name: Configure dark mode
+        if: env.DARK_MODE == 'ya'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $user = $env:RDP_USER
-          
-          if ($env:WIN10 -eq 'ya') {
-              $userSid = (Get-LocalUser -Name $user -ErrorAction SilentlyContinue).SID.Value
-              if ($userSid) {
-                  $regPath = "Registry::HKEY_USERS\$userSid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-                  if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-                  Set-ItemProperty -Path $regPath -Name 'AppsUseLightTheme' -Value 0 -Type DWord -Force
-                  Set-ItemProperty -Path $regPath -Name 'SystemUsesLightTheme' -Value 0 -Type DWord -Force
-              }
+          $user = Get-LocalUser -Name $env:RDP_USER -ErrorAction SilentlyContinue
+          if (-not $user) { Write-Warning 'RDP user not found; cannot set dark mode.'; exit 0 }
+          $sid = $user.SID.Value
+          $hivePath = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+          if (Test-Path "Registry::HKEY_USERS\$sid") {
+            New-Item -Path $hivePath -Force | Out-Null
+            Set-ItemProperty -Path $hivePath -Name 'AppsUseLightTheme' -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $hivePath -Name 'SystemUsesLightTheme' -Value 0 -Type DWord -Force
+            Write-Host 'Dark mode settings applied to the loaded user hive.'
+          } else {
+            Write-Warning 'User registry hive is not loaded yet; dark mode may need to be enabled after the first sign-in.'
           }
 
-          if ($env:MICROPHONE -eq 'ya') {
-              $tsPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
-              if (-not (Test-Path $tsPolicy)) { New-Item -Path $tsPolicy -Force | Out-Null }
-              Set-ItemProperty -Path $tsPolicy -Name 'fDisableAudioCapture' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-              Set-ItemProperty -Path $tsPolicy -Name 'fDisableCam' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-          }
-
-      # ------------------------------------------------------------------
-      # 5. MESA3D (BẮT BUỘC)
-      # ------------------------------------------------------------------
-      - name: Setup Mesa3D (if enabled)
-        if: env.GRAFIS == 'software'
+      - name: Configure audio and microphone policies
+        if: env.MICROPHONE == 'ya'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          Write-Host "--- Mesa3D Setup ---"
-          $mesaUrl = 'https://github.com/pal1000/mesa-dist-win/releases/download/25.3.1/mesa3d-25.3.1-release-msvc.7z'
-          $mesaArchive = Join-Path $env:TEMP_DIR 'mesa3d.7z'
-          $mesaDir = Join-Path $env:WORK_DIR 'mesa3d'
-          
-          try {
-              Invoke-WebRequest -Uri $mesaUrl -OutFile $mesaArchive -UseBasicParsing -TimeoutSec 300
-              if ((Get-Item $mesaArchive).Length -lt 1MB) { throw "Mesa3D archive too small." }
-              
-              $sevenZip = Get-Command '7z.exe' -ErrorAction SilentlyContinue
-              if (-not $sevenZip) {
-                  $installed7z = Get-ChildItem -Path "C:\Program Files\7-Zip\7z.exe" -ErrorAction SilentlyContinue
-                  if ($installed7z) { $sevenZip = $installed7z.FullName }
-                  else {
-                      winget install --id 7zip.7zip --silent --accept-package-agreements --accept-source-agreements | Out-Null
-                      $sevenZip = (Get-Command '7z.exe' -ErrorAction SilentlyContinue).Source
-                  }
-              }
-              if ($sevenZip) {
-                  $sevenZipCmd = if ($sevenZip -is [System.Management.Automation.ApplicationInfo]) { $sevenZip.Source } else { $sevenZip }
-                  & $sevenZipCmd x $mesaArchive "-o$mesaDir" -y | Out-Null
-                  Write-Host "Mesa3D successfully extracted to $mesaDir."
-              } else { throw "Cannot find or install 7z.exe." }
-          } catch { Write-Warning "Mesa3D setup failed: $_" }
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+          New-Item -Path $policy -Force | Out-Null
+          Set-ItemProperty -Path $policy -Name 'fDisableAudioCapture' -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path $policy -Name 'fDisableAudioPlayback' -Value 0 -Type DWord -Force
+          Write-Host 'Audio redirection policies enabled where supported by the runner.'
+          Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Select-Object Name, Status | Format-Table -AutoSize
 
-      # ------------------------------------------------------------------
-      # 6. CÀI ĐẶT ỨNG DỤNG VÀ WALLPAPER
-      # ------------------------------------------------------------------
-      - name: Install selected apps
+      # 7. Optional general-purpose applications only. No games or game runtimes are installed.
+      - name: Install optional utilities
+        if: env.EXTRAS == 'ya' || env.DISCORD == 'ya'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          if ($env:DISCORD -eq 'ya') { winget install --id Discord.Discord --silent --accept-package-agreements --accept-source-agreements | Out-Null }
-          if ($env:EKSTRA -eq 'ya') {
-              winget install --id 7zip.7zip --silent --accept-package-agreements --accept-source-agreements | Out-Null
-              winget install --id Google.Chrome --silent --accept-package-agreements --accept-source-agreements | Out-Null
-              winget install --id Skillbrains.Lightshot --silent --accept-package-agreements --accept-source-agreements | Out-Null
+          $status = [ordered]@{}
+          function Install-WingetPackage([string]$Id, [string]$Label) {
+            try {
+              $wg = Get-Command 'winget.exe' -ErrorAction Stop
+              & $wg.Source install --id $Id --exact --silent --accept-package-agreements --accept-source-agreements
+              if ($LASTEXITCODE -eq 0) { $script:status[$Label] = 'installed' }
+              else { $script:status[$Label] = "failed_exit_$LASTEXITCODE"; Write-Warning "$Label installation failed (exit $LASTEXITCODE)." }
+            } catch { $script:status[$Label] = 'failed'; Write-Warning "Could not install $Label: $_" }
           }
+          if ($env:EXTRAS -eq 'ya') {
+            Install-WingetPackage '7zip.7zip' '7-Zip'
+            Install-WingetPackage 'Google.Chrome' 'Chrome'
+            Install-WingetPackage 'Skillbrains.Lightshot' 'Lightshot'
+          }
+          if ($env:DISCORD -eq 'ya') { Install-WingetPackage 'Discord.Discord' 'Discord' }
+          $status | ConvertTo-Json -Depth 4 | Out-File -FilePath (Join-Path $env:WORK_DIR 'app_status.json') -Encoding utf8
 
-      - name: Apply wallpaper from assets (if exists)
+      - name: Apply wallpaper from assets if present
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $wpSource = Join-Path $env:GITHUB_WORKSPACE 'assets\wallpaper.jpg'
-          if (-not (Test-Path $wpSource)) { Write-Warning "assets/wallpaper.jpg not found. Skipping."; return }
-          $wpDest = Join-Path $env:WORK_DIR 'wallpaper.jpg'
-          Copy-Item -Path $wpSource -Destination $wpDest -Force
-          $user = $env:RDP_USER
-          $userSid = (Get-LocalUser -Name $user).SID.Value
-          $desktopPath = "Registry::HKEY_USERS\$userSid\Control Panel\Desktop"
-          if (-not (Test-Path $desktopPath)) { New-Item -Path $desktopPath -Force | Out-Null }
-          Set-ItemProperty -Path $desktopPath -Name 'WallPaper' -Value $wpDest -Type String -Force
-          Set-ItemProperty -Path $desktopPath -Name 'WallpaperStyle' -Value '10' -Type String -Force
-          Write-Host "Wallpaper set."
-
-      # ------------------------------------------------------------------
-      # 7. GỬI THÔNG TIN VỀ TERMUX (NẾU CÓ)
-      # ------------------------------------------------------------------
-      - name: Send Credentials to Phone Server
-        shell: pwsh
-        env:
-          PHONE_SERVER_URL: ${{ secrets.PHONE_SERVER_URL }}
-          INSTANCE_NUMBER: ${{ inputs.instance_number }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:PHONE_SERVER_URL)) {
-              Write-Host "PHONE_SERVER_URL secret is not set. Skipping webhook."
-              return
-          }
-          
-          $baseUrl = $env:PHONE_SERVER_URL.TrimEnd('/')
-          $url = "$baseUrl/api/provision/$($env:INSTANCE_NUMBER)"
-          
-          $body = @{
-              rustdesk_id       = "$env:RUSTDESK_ID"
-              rustdesk_password = "$env:SECRET_RDP_PASSWORD"
-          } | ConvertTo-Json
-          
-          try {
-              $res = Invoke-RestMethod -Uri $url -Method Post -Body $body -ContentType "application/json" -TimeoutSec 30
-              Write-Host "Sent to Termux successfully!"
-          } catch {
-              Write-Host "Failed to send to Termux: $_"
+          $source = Join-Path $env:GITHUB_WORKSPACE 'assets\wallpaper.jpg'
+          if (-not (Test-Path $source)) { Write-Host 'assets/wallpaper.jpg not found; wallpaper step skipped.'; exit 0 }
+          $destination = Join-Path $env:WORK_DIR 'wallpaper.jpg'
+          Copy-Item -LiteralPath $source -Destination $destination -Force
+          $user = Get-LocalUser -Name $env:RDP_USER -ErrorAction SilentlyContinue
+          if ($user -and (Test-Path "Registry::HKEY_USERS\$($user.SID.Value)")) {
+            $desktop = "Registry::HKEY_USERS\$($user.SID.Value)\Control Panel\Desktop"
+            New-Item -Path $desktop -Force | Out-Null
+            Set-ItemProperty -Path $desktop -Name 'WallPaper' -Value $destination -Type String -Force
+            Set-ItemProperty -Path $desktop -Name 'WallpaperStyle' -Value '10' -Type String -Force
+            Write-Host 'Wallpaper registered for the loaded user profile.'
+          } else {
+            Write-Host "Wallpaper copied to $destination. It can be applied after the user signs in."
           }
 
-      # ------------------------------------------------------------------
-      # 8. CÔNG BỐ THÔNG TIN ĐĂNG NHẬP RUSTDESK
-      # ------------------------------------------------------------------
-      - name: Publish RustDesk login information
+      # 8. Publish connection instructions without printing the password.
+      - name: Publish RustDesk connection information
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $rustdeskId = $env:RUSTDESK_ID
-          
-          $summary = @()
-          $summary += "## Layer7 RustDesk Session Ready"
-          $summary += ""
-          $summary += "| Thông tin | Giá trị |"
-          $summary += "|-----------|---------|"
-          $summary += "| **Mã đơn hàng** | ``${{ inputs.instance_number }}`` |"
-          $summary += "| **RustDesk ID** | ``$rustdeskId`` |"
-          $summary += "| **Mật khẩu** | ``$env:SECRET_RDP_PASSWORD`` |"
-          $summary += "| **Hostname** | ``$env:HOSTNAME`` |"
-          $summary += ""
-          $summary += "### Hướng dẫn kết nối"
-          $summary += "1. Mở ứng dụng **RustDesk** trên máy của bạn."
-          $summary += "2. Nhập **ID** ở trên vào ô ``Remote ID``."
-          $summary += "3. Nhấn **Connect**."
-          $summary += "4. Nhập **mật khẩu** khi được yêu cầu."
-          $summary += ""
-          $summary += "*Phiên sẽ tự động kết thúc sau khoảng $env:DUR phút.*"
+          $idFile = Join-Path $env:WORK_DIR 'rustdesk_id.txt'
+          if (-not (Test-Path $idFile)) { throw 'RustDesk ID file not found.' }
+          $id = (Get-Content $idFile -Raw).Trim()
+          if ($id -notmatch '^\d+$') { throw 'RustDesk ID is invalid.' }
+          $lines = @(
+            '## Layer7 remote session ready',
+            '',
+            '| Thông tin | Giá trị |',
+            '|---|---|',
+            "| RustDesk ID | ``$id`` |",
+            "| Windows user | ``$env:RDP_USER`` |",
+            "| Hostname requested | ``$env:LAYER7_HOSTNAME`` |",
+            "| Mesa3D | Required; retained at ``C:\Layer7\mesa3d`` |",
+            "| Session duration | $env:DUR minutes |",
+            '',
+            '### Kết nối bằng RustDesk',
+            '1. Mở RustDesk trên thiết bị của bạn.',
+            "2. Nhập ID: ``$id``.",
+            '3. Nhập mật khẩu đã đặt trong repository secret ``RDP_PASSWORD`` khi được yêu cầu.',
+            '',
+            '> Không chia sẻ secret RDP_PASSWORD hoặc log chứa thông tin đăng nhập. Mật khẩu không được in trong Summary.',
+            '',
+            'Phiên sẽ kết thúc sau thời lượng đã chọn; lưu công việc trước khi hết giờ.'
+          )
+          $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Write-Host "RustDesk ID: $id"
+          Write-Host 'Password is kept secret and has not been printed.'
 
-          $summary -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
-          Write-Host "RustDesk login information published."
-
-      # ------------------------------------------------------------------
-      # 9. KEEPALIVE
-      # ------------------------------------------------------------------
+      # 9. Keepalive within GitHub-hosted runner time limits.
       - name: Keep session alive
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $durationMin = [int]$env:DUR
-          $loopMin = [math]::Max(5, $durationMin - 5)
-          $endTime = (Get-Date).AddMinutes($loopMin)
-          Write-Host "Keepalive started until approximately $($endTime.ToString('u'))."
+          $durationMinutes = [int]$env:DUR
+          $startFile = Join-Path $env:WORK_DIR 'session-start.utc'
+          if (-not (Test-Path $startFile)) { throw 'Session start timestamp is missing.' }
+          $startTime = [DateTime]::Parse((Get-Content -LiteralPath $startFile -Raw).Trim()).ToLocalTime()
+          # Reserve 8 minutes of the 360-minute job limit for persistence, artifact upload and cleanup.
+          $endTime = $startTime.AddMinutes([math]::Max(2, $durationMinutes - 8))
+          Write-Host "Keepalive loop starts; session began $($startTime.ToString('u')); scheduled end: $($endTime.ToString('u'))."
           while ((Get-Date) -lt $endTime) {
-              $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-              if ($svc -and $svc.Status -ne 'Running') { Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue }
-              Write-Host "[$(Get-Date -Format 'u')] RustDesk Service is $($svc.Status)"
-              Start-Sleep -Seconds 60
+            $rustdeskService = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+            $rdpService = Get-Service -Name 'TermService' -ErrorAction SilentlyContinue
+            $rustdeskState = if ($rustdeskService) { $rustdeskService.Status } else { 'NotFound' }
+            $rdpState = if ($rdpService) { $rdpService.Status } else { 'NotFound' }
+            Write-Host "[$(Get-Date -Format 'u')] RustDesk=$rustdeskState; RDP=$rdpState; Mesa3D=$(Test-Path $env:MESA_DIR)"
+            Start-Sleep -Seconds 300
           }
-          Write-Host "Keepalive period ended."
+          Write-Host 'Keepalive period ended.'
 
-      # ------------------------------------------------------------------
-      # 10. PERSIST STATE VÀ UPLOAD ARTIFACT
-      # ------------------------------------------------------------------
-      - name: Persist allowed state
+      # 10. Package user files if present. Mesa3D is intentionally excluded from the cleanup list.
+      - name: Persist user files
         if: always()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $zipPath = Join-Path $env:PERSIST_DIR 'layer7-state.zip'
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
-          
-          $user = $env:RDP_USER
-          $allowedPaths = @("C:\Users\$user\Desktop", "C:\Users\$user\Documents", "C:\Users\$user\Downloads")
           $staging = Join-Path $env:TEMP_DIR 'persist-staging'
-          if (Test-Path $staging) { Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue }
           New-Item -ItemType Directory -Path $staging -Force | Out-Null
-          
-          foreach ($p in $allowedPaths) {
-              if (Test-Path $p) { Copy-Item -Path $p -Destination (Join-Path $staging (Split-Path $p -Leaf)) -Recurse -Force -ErrorAction SilentlyContinue }
+          $profile = "C:\Users\$env:RDP_USER"
+          foreach ($folderName in @('Desktop','Documents','Downloads')) {
+            $source = Join-Path $profile $folderName
+            if (Test-Path $source) {
+              Copy-Item -LiteralPath $source -Destination (Join-Path $staging $folderName) -Recurse -Force -ErrorAction SilentlyContinue
+            }
           }
-          
-          try {
-              Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath -Force -ErrorAction Stop
-              Write-Host "State archive created: $zipPath"
-          } catch { Write-Warning "Failed to create archive: $_" }
+          foreach ($fileName in @('rustdesk_id.txt','mesa3d-info.txt','app_status.json','session-start.utc')) {
+            $source = Join-Path $env:WORK_DIR $fileName
+            if (Test-Path $source) { Copy-Item -LiteralPath $source -Destination $staging -Force -ErrorAction SilentlyContinue }
+          }
+          $zipPath = Join-Path $env:PERSIST_DIR 'layer7-state.zip'
+          if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue }
+          $items = Get-ChildItem -LiteralPath $staging -Force -ErrorAction SilentlyContinue
+          if ($items) {
+            Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath -Force -ErrorAction SilentlyContinue
+          }
+          if (Test-Path $zipPath) { Write-Host "Persistence archive created at $zipPath" } else { Write-Host 'No user data was available to archive.' }
 
       - name: Upload state artifact
         if: always()
@@ -518,17 +474,21 @@ jobs:
         with:
           name: layer7-state
           path: C:\Layer7\persist\layer7-state.zip
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: warn
 
-      # ------------------------------------------------------------------
-      # 11. CLEANUP
-      # ------------------------------------------------------------------
-      - name: Finalize and cleanup
+      # 11. Cleanup only temporary installers. Never delete Mesa3D here.
+      - name: Finalize and cleanup temporary files
         if: always()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          Write-Host "--- Cleanup ---"
-          Remove-Item (Join-Path $env:TEMP_DIR '*') -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "Cleanup done."
+          Write-Host 'Cleaning temporary installers and staging data...'
+          Remove-Item -Path (Join-Path $env:TEMP_DIR '*') -Recurse -Force -ErrorAction SilentlyContinue
+          # INTENTIONALLY DO NOT DELETE C:\Layer7\mesa3d: Mesa3D is a required component.
+          if (-not (Test-Path $env:MESA_DIR)) {
+            Write-Error 'Required Mesa3D directory is missing at finalization.'
+          } else {
+            Write-Host "Mesa3D retained at $env:MESA_DIR until the runner session ends."
+          }
+          Write-Host "Persisted user state, when available, remains at $env:PERSIST_DIR."
