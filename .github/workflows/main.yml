@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       instance_number:
-        description: 'Mã đơn hàng (VD: ORD-123)'
+        description: 'Mã đơn hàng'
         required: true
         type: string
       hours:
-        description: 'Số giờ thuê (VD: 3)'
+        description: 'Số giờ thuê (1-5)'
         required: true
         default: '3'
         type: string
@@ -67,24 +67,18 @@ jobs:
 
       - name: Install and configure RustDesk
         shell: powershell
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           $ErrorActionPreference = 'Stop'
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           
-          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest' -Headers @{ 'User-Agent' = 'Layer7' }
-          $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-.*-x86_64\.(msi|exe)$' } | Select-Object -First 1
-          if (-not $asset) { throw 'RustDesk package not found.' }
+          # Dùng link tải trực tiếp bản 1.3.7 để tránh bị treo do gọi API
+          $installer = "$env:TEMP_DIR\rustdesk.exe"
+          Write-Host "Downloading RustDesk directly..."
+          Invoke-WebRequest -Uri 'https://github.com/rustdesk/rustdesk/releases/download/1.3.7/rustdesk-1.3.7-x86_64.exe' -OutFile $installer -UseBasicParsing -TimeoutSec 300
 
-          $installer = Join-Path $env:TEMP_DIR $asset.name
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installer
-
-          if ($asset.name -match '\.msi$') {
-            $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', "`"$installer`"", '/qn', '/norestart') -Wait -PassThru
-          } else {
-            $p = Start-Process -FilePath $installer -ArgumentList '--silent-install' -Wait -PassThru -WindowStyle Hidden
-          }
-          if ($p.ExitCode -notin @(0, 1641, 3010)) { throw "RustDesk install failed: $($p.ExitCode)" }
+          Write-Host "Installing RustDesk silently..."
+          Start-Process -FilePath $installer -ArgumentList '--silent-install' -Wait -NoNewWindow
+          Start-Sleep -Seconds 10
 
           $rustdeskExe = "$env:ProgramFiles\RustDesk\rustdesk.exe"
           if (-not (Test-Path $rustdeskExe)) {
@@ -93,16 +87,21 @@ jobs:
           if (-not $rustdeskExe) { throw 'rustdesk.exe not found after install.' }
           "RUSTDESK_EXE=$rustdeskExe" >> $env:GITHUB_ENV
 
-          & $rustdeskExe --install-service
-          Start-Sleep -Seconds 5
-          Start-Service -Name RustDesk -ErrorAction SilentlyContinue
+          Write-Host "Installing RustDesk service..."
+          Start-Process -FilePath $rustdeskExe -ArgumentList '--install-service' -Wait -NoNewWindow
           Start-Sleep -Seconds 5
           
-          & $rustdeskExe --password "$env:GENERATED_PASSWORD"
-          Start-Sleep -Seconds 3
+          Write-Host "Starting RustDesk service..."
+          Start-Service -Name RustDesk -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 10
+          
+          Write-Host "Setting RustDesk password..."
+          Start-Process -FilePath $rustdeskExe -ArgumentList "--password `"$env:GENERATED_PASSWORD`"" -Wait -NoNewWindow
+          Start-Sleep -Seconds 5
 
+          Write-Host "Getting RustDesk ID..."
           $rustdeskId = $null
-          for ($i = 1; $i -le 15 -and -not $rustdeskId; $i++) {
+          for ($i = 1; $i -le 10 -and -not $rustdeskId; $i++) {
             $idOutput = @(& $rustdeskExe --get-id 2>&1)
             foreach ($line in $idOutput) {
               if (([string]$line).Trim() -match '^\d{6,20}$') { $rustdeskId = $matches[0]; break }
