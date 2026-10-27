@@ -40,8 +40,25 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-          $password = -join (1..16 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+          # Đảm bảo mật khẩu luôn có đủ: Chữ hoa, Chữ thường, Số, Ký tự đặc biệt
+          $upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+          $lower = 'abcdefghijkmnopqrstuvwxyz'
+          $digits = '23456789'
+          $special = '!@#'
+          
+          $pass = @(
+            $upper[(Get-Random -Maximum $upper.Length)]
+            $lower[(Get-Random -Maximum $lower.Length)]
+            $digits[(Get-Random -Maximum $digits.Length)]
+            $special[(Get-Random -Maximum $special.Length)]
+          )
+          
+          $allChars = $upper + $lower + $digits + $special
+          for ($i = 0; $i -lt 12; $i++) {
+              $pass += $allChars[(Get-Random -Maximum $allChars.Length)]
+          }
+          $password = -join ($pass | Sort-Object { Get-Random })
+          
           "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
           "RDP_USERNAME=Layer7Store" >> $env:GITHUB_ENV
 
@@ -49,12 +66,26 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          # Bật RDP
+          
+          # 1. Tắt chính sách mật khẩu phức tạp (Để tránh lỗi InvalidPassword)
+          Write-Host "Disabling password complexity policy..."
+          $seceditFile = "$env:TEMP\secpol.inf"
+          @"
+          [Unicode]
+          Unicode=yes
+          [System Access]
+          PasswordComplexity = 0
+          MinimumPasswordLength = 0
+          "@ | Out-File -FilePath $seceditFile -Encoding Unicode
+          secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY | Out-Null
+          Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
+          
+          # 2. Bật RDP
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1
           Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
 
-          # Tạo User
+          # 3. Tạo User
           $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
           $user = Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue
           if ($null -eq $user) {
@@ -73,7 +104,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           
-          # Tải Bore (siêu nhẹ, không cần cài đặt)
           $boreZip = "$env:TEMP_DIR\bore.zip"
           Write-Host "Downloading Bore Tunnel..."
           Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.5.3/bore-v0.5.3-x86_64-pc-windows-msvc.zip" -OutFile $boreZip -UseBasicParsing
@@ -83,15 +113,12 @@ jobs:
           
           if (-not (Test-Path $boreExe)) { throw 'bore.exe not found.' }
 
-          # Chạy Bore để mở cổng 3389 (RDP)
           Write-Host "Starting Bore tunnel for RDP (port 3389)..."
           $boreLog = "$env:TEMP_DIR\bore.log"
           Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -WindowStyle Hidden -RedirectStandardOutput $boreLog
           
-          # Đợi 15s để Bore khởi tạo và lấy IP Public
           Start-Sleep -Seconds 15
 
-          # Đọc log để lấy IP:Port
           $publicAddress = $null
           if (Test-Path $boreLog) {
               $logContent = Get-Content $boreLog -Raw
@@ -164,7 +191,6 @@ jobs:
           
           $url = "$($env:PHONE_SERVER_URL.TrimEnd('/'))/api/provision/$nodeId"
           
-          # Gửi thông tin về cho Web Server (Thay đổi cấu trúc payload để phù hợp với RDP)
           $body = @{
             remote_id = $env:BORE_ADDRESS
             password = $env:GENERATED_PASSWORD
@@ -192,7 +218,6 @@ jobs:
           Write-Host "Session ends at: $end"
           
           while ((Get-Date) -lt $end) {
-            # Đảm bảo Bore vẫn đang chạy
             $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
             if (-not $boreProc) {
                 Write-Host "Bore died! Restarting..."
