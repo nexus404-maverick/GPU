@@ -1,235 +1,322 @@
-name: Layer7 Store Cloud PC (RustDesk)
+name: RdpFree — RDP Chỉ Cần Kết Nối
 
 on:
   workflow_dispatch:
     inputs:
-      instance_number:
-        description: 'Mã đơn hàng'
-        required: true
+      durasi_menit:
+        description: 'Thời gian phiên (phút, 10–360)'
+        required: false
+        default: '360'
         type: string
-      hours:
-        description: 'Số giờ thuê (1-5)'
-        required: true
-        default: '3'
+      hostname:
+        description: 'Tên máy ảo'
+        required: false
+        default: 'rdpfree'
         type: string
+      rdp_user:
+        description: 'Tên người dùng RDP (3–20 ký tự)'
+        required: false
+        default: 'xyadmin'
+        type: string
+      storage_boost:
+        description: 'Dọn dẹp bộ nhớ đệm để giải phóng dung lượng'
+        required: false
+        default: 'ya'
+        type: choice
+        options:
+          - ya
+          - tidak
+      debloat:
+        description: 'Dọn dẹp dịch vụ nền'
+        required: false
+        default: 'ringan'
+        type: choice
+        options:
+          - ringan
+          - full
+          - tidak
+      win10:
+        description: 'Giao diện kiểu Windows 10'
+        required: false
+        default: 'ya'
+        type: choice
+        options:
+          - ya
+          - tidak
+      xydesk:
+        description: 'Tối ưu hóa hiển thị & âm thanh RDP'
+        required: false
+        default: 'ya'
+        type: choice
+        options:
+          - ya
+          - tidak
+      ekstra:
+        description: 'Cài ứng dụng cơ bản (7-Zip, Chrome, Lightshot)'
+        required: false
+        default: 'ya'
+        type: choice
+        options:
+          - ya
+          - tidak
+      grafis:
+        description: 'Tối ưu hóa đồ họa'
+        required: false
+        default: 'software'
+        type: choice
+        options:
+          - software
+          - tidak
+      runner:
+        description: 'Hệ điều hành máy chủ'
+        required: false
+        default: 'windows-2022'
+        type: choice
+        options:
+          - windows-2022
+          - windows-2025
+          - windows-latest
+          - ubuntu-24.04
+          - ubuntu-22.04
+          - ubuntu-latest
+      linux_mode:
+        description: 'Chế độ Linux'
+        required: false
+        default: 'desktop'
+        type: choice
+        options:
+          - desktop
+          - polos
+      microphone:
+        description: 'Kích hoạt chuyển hướng micro & máy ảnh qua RDP'
+        required: false
+        default: 'ya'
+        type: choice
+        options:
+          - ya
+          - tidak
+      perpanjang_otomatis:
+        description: 'Tự động tiếp tục phiên khi hết giờ'
+        required: false
+        default: 'ya'
+        type: choice
+        options:
+          - ya
+          - tidak
+      discord:
+        description: 'Cài Discord'
+        required: false
+        default: 'tidak'
+        type: choice
+        options:
+          - ya
+          - tidak
 
 permissions:
+  contents: write
   actions: write
-  contents: read
+
+concurrency:
+  group: rdpfree-active-session
+  cancel-in-progress: false
 
 jobs:
-  deploy-instance:
-    runs-on: windows-2025
+  rdp:
+    name: Phiên RDP (${{ inputs.runner || 'windows-2022' }})
+    runs-on: ${{ inputs.runner || 'windows-2022' }}
     timeout-minutes: 360
+    env:
+      DUR: ${{ inputs.durasi_menit || '360' }}
+      HOSTNAME: ${{ inputs.hostname || 'rdpfree' }}
+      RDP_USER: ${{ inputs.rdp_user || 'xyadmin' }}
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      STORAGE_BOOST: ${{ inputs.storage_boost || 'ya' }}
+      DEBLOAT: ${{ inputs.debloat || 'ringan' }}
+      WIN10: ${{ inputs.win10 || 'ya' }}
+      XYDESK: ${{ inputs.xydesk || 'ya' }}
+      EKSTRA: ${{ inputs.ekstra || 'ya' }}
+      GRAFIS: ${{ inputs.grafis || 'software' }}
+      LINUX_MODE: ${{ inputs.linux_mode || 'desktop' }}
+      MICROPHONE: ${{ inputs.microphone || 'ya' }}
+      PERPANJANG_OTOMATIS: ${{ inputs.perpanjang_otomatis || 'ya' }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v5
+      - name: Tải mã nguồn
+        uses: actions/checkout@v4
 
-      - name: Initialize workspace
-        shell: powershell
+      # ==================================================
+      # LINUX — XRDP trên cổng 3389
+      # ==================================================
+      - name: Cài đặt RDP cho Linux (XRDP cổng :3389)
+        if: ${{ startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $work = 'C:\Layer7'
-          $temp = Join-Path $work 'temp'
-          New-Item -ItemType Directory -Path $work,$temp -Force | Out-Null
-          "WORK_DIR=$work" >> $env:GITHUB_ENV
-          "TEMP_DIR=$temp" >> $env:GITHUB_ENV
+          chmod +x ./scripts/setup-linux-rdp.sh
+          ./scripts/setup-linux-rdp.sh --setup-only
 
-      - name: Generate Passwords
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-          $password = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-          
-          "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
-          "RDP_USERNAME=Layer7Store" >> $env:GITHUB_ENV
+      - name: Giữ phiên hoạt động [Linux]
+        if: ${{ startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: bash
+        run: ./scripts/setup-linux-rdp.sh --keepalive-only
 
-      - name: Setup Windows account
-        shell: powershell
+      - name: Kết thúc phiên [Linux]
+        if: ${{ always() && startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: bash
+        continue-on-error: true
+        run: ./scripts/setup-linux-rdp.sh --finalize-only
+
+      # ==================================================
+      # WINDOWS — RDP gốc trên cổng 3389
+      # ==================================================
+      - name: Dọn dẹp phiên cũ
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/cleanup-actions.ps1
+
+      - name: Bật Dịch vụ RDP trên cổng 3389 + Tạo tài khoản
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: pwsh
+        run: ./scripts/setup-rdp.ps1
+
+      - name: Khôi phục trạng thái phiên trước
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/restore-state.ps1
+
+      - name: Tối ưu hóa dung lượng
+        timeout-minutes: 15
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') && ((inputs.storage_boost || 'ya') != 'tidak' || (inputs.debloat || 'ringan') != 'tidak') }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/optimize-storage.ps1
+
+      - name: Giao diện Windows 10
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') && (inputs.win10 || 'ya') != 'tidak' }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/setup-win10.ps1
+
+      - name: Tùy chỉnh Desktop & File Explorer
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/setup-explorer.ps1
+
+      - name: Kích hoạt chuyển hướng âm thanh & thiết bị qua RDP
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') && (inputs.microphone || 'ya') != 'tidak' }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/setup-media.ps1
+
+      - name: Tối ưu hóa đồ họa cho RDP
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') && (inputs.grafis || 'software') != 'tidak' }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/setup-grafis.ps1
+
+      - name: Cài ứng dụng cơ bản
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') && (inputs.ekstra || 'ya') != 'tidak' }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/setup-extras.ps1
+
+      - name: Tối ưu hóa hiển thị RDP
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') && (inputs.xydesk || 'ya') != 'tidak' }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/setup-xydesk.ps1
+
+      - name: Cài Discord
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') && (inputs.discord || 'tidak') == 'ya' }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/setup-discord.ps1
+
+      - name: Thông báo trạng thái — Sẵn sàng kết nối RDP
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/publish-status.ps1
+
+      - name: Giữ phiên hoạt động
+        if: ${{ !startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: pwsh
+        run: ./scripts/keepalive.ps1
+
+      - name: Lưu trạng thái phiên
+        if: ${{ always() && !startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/persist-state.ps1
+
+      - name: Tải trạng thái phiên lên
+        if: ${{ always() && !startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: xyrdp-state
+          path: C:\XyRDP\persist\xyrdp-state.zip
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Kết thúc phiên
+        if: ${{ always() && !startsWith(inputs.runner || 'windows-2022', 'ubuntu') }}
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/finalize-rdp.ps1
+
+      - name: Tự động tạo phiên tiếp theo
+        if: ${{ success() && (inputs.perpanjang_otomatis || 'ya') != 'tidak' }}
+        shell: pwsh
+        continue-on-error: true
         run: |
+          $hdr = @{
+            Authorization          = "Bearer $($env:GITHUB_TOKEN)"
+            Accept                 = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $body = @{
+            ref    = 'main'
+            inputs = @{
+              durasi_menit        = "$($env:DUR)"
+              hostname            = "$($env:HOSTNAME)"
+              rdp_user            = "$($env:RDP_USER)"
+              storage_boost       = "$($env:STORAGE_BOOST)"
+              debloat             = "$($env:DEBLOAT)"
+              win10               = "$($env:WIN10)"
+              xydesk              = "$($env:XYDESK)"
+              ekstra              = "$($env:EKSTRA)"
+              grafis              = "$($env:GRAFIS)"
+              runner              = "${{ inputs.runner || 'windows-2022' }}"
+              linux_mode          = "$($env:LINUX_MODE)"
+              microphone          = "$($env:MICROPHONE)"
+              discord             = "$($env:DISCORD)"
+              perpanjang_otomatis = "$($env:PERPANJANG_OTOMATIS)"
+            }
+          } | ConvertTo-Json -Depth 5
           try {
-              $seceditFile = "$env:TEMP\secpol.inf"
-              $seceditContent = @("[Unicode]", "Unicode=yes", "[System Access]", "PasswordComplexity = 0", "MinimumPasswordLength = 0")
-              Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
-              $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
-              Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
-              
-              $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
-              $user = Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue
-              if ($null -eq $user) {
-                New-LocalUser -Name $env:RDP_USERNAME -Password $secure -PasswordNeverExpires -AccountNeverExpires -FullName 'Layer7 Store' -ErrorAction SilentlyContinue
-              } else {
-                Set-LocalUser -Name $env:RDP_USERNAME -Password $secure -ErrorAction SilentlyContinue
-              }
-              Add-LocalGroupMember -Group 'Administrators' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
-          } catch { Write-Host "Warning: $_" }
-          exit 0
-
-      - name: Download RustDesk MSI
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Write-Host "Downloading RustDesk MSI..."
-          # Tải bằng link trực tiếp, không qua API
-          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.msi" -OutFile "$env:TEMP_DIR\rustdesk.msi" -UseBasicParsing
-
-      - name: Install RustDesk MSI
-        shell: powershell
-        timeout-minutes: 5
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "Installing RustDesk via MSI..."
-          
-          # Sử dụng msiexec với timeout để tránh treo vô hạn
-          $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$env:TEMP_DIR\rustdesk.msi`" /qn /norestart" -PassThru -WindowStyle Hidden
-          
-          if (-not $proc.WaitForExit(180000)) {
-              Write-Host "MSI installation timed out after 3 minutes, killing process..."
-              $proc.Kill()
-          } else {
-              Write-Host "MSI installation finished with exit code: $($proc.ExitCode)"
-          }
-          
-          # Tắt các process GUI bị treo (nếu có)
-          Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 3
-
-      - name: Locate RustDesk Executable
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Write-Host "Finding rustdesk.exe..."
-          
-          # Tìm ở mọi ngóc ngách có thể
-          $paths = @(
-              "$env:ProgramFiles\RustDesk\rustdesk.exe",
-              "${env:ProgramFiles(x86)}\RustDesk\rustdesk.exe",
-              "$env:LOCALAPPDATA\Programs\RustDesk\rustdesk.exe",
-              "$env:LOCALAPPDATA\RustDesk\rustdesk.exe"
-          )
-          
-          $rustdeskExe = $null
-          foreach ($p in $paths) {
-              if (Test-Path $p) { $rustdeskExe = $p; break }
-          }
-          
-          if (-not $rustdeskExe) {
-              $rustdeskExe = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter rustdesk.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
-          }
-          
-          if (-not $rustdeskExe) { throw "rustdesk.exe not found." }
-          
-          Write-Host "Found at: $rustdeskExe"
-          "RUSTDESK_EXE=$rustdeskExe" >> $env:GITHUB_ENV
-
-      - name: Install RustDesk Service
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "Installing RustDesk Service..."
-          Start-Process -FilePath $env:RUSTDESK_EXE -ArgumentList '--install-service' -Wait -NoNewWindow
-          
-          Write-Host "Starting RustDesk Service..."
-          Start-Service -Name RustDesk -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 5
-          
-          Write-Host "Killing GUI processes to avoid hang..."
-          Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
-
-      - name: Configure RustDesk Password
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "Setting RustDesk Password..."
-          
-          $proc = Start-Process -FilePath $env:RUSTDESK_EXE -ArgumentList "--password `"$env:GENERATED_PASSWORD`"" -PassThru -NoNewWindow
-          
-          if (-not $proc.WaitForExit(15000)) {
-              Write-Host "Password configuration timed out, killing..."
-              $proc.Kill()
-          }
-          Start-Sleep -Seconds 3
-
-      - name: Get RustDesk ID
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "Getting RustDesk ID..."
-          
-          $rustdeskId = $null
-          for ($i = 1; $i -le 10 -and -not $rustdeskId; $i++) {
-            $idOutput = @(& $env:RUSTDESK_EXE --get-id 2>&1)
-            foreach ($line in $idOutput) {
-              if (([string]$line).Trim() -match '^\d{6,20}$') { $rustdeskId = $matches[0]; break }
-            }
-            if (-not $rustdeskId) { Start-Sleep -Seconds 3 }
-          }
-          
-          if (-not $rustdeskId) { 
-              Write-Host "Failed to get RustDesk ID."
-              exit 1 
-          }
-          
-          Write-Host "RustDesk ID obtained: $rustdeskId"
-          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
-
-      - name: Publish Connection Information
-        shell: powershell
-        env:
-          PHONE_SERVER_URL: ${{ secrets.PHONE_SERVER_URL }}
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $nodeId = [string]'${{ github.event.inputs.instance_number }}'
-          
-          $summary = @(
-            '## Layer7 Store Cloud PC (RustDesk)',
-            "- Order: $nodeId",
-            "- RustDesk ID: $env:RUSTDESK_ID",
-            "- Password: $env:GENERATED_PASSWORD"
-          )
-          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
-
-          if (-not [string]::IsNullOrWhiteSpace($env:PHONE_SERVER_URL)) {
-            $url = "$($env:PHONE_SERVER_URL.TrimEnd('/'))/api/provision/$nodeId"
-            $body = @{ remote_id = $env:RUSTDESK_ID; password = $env:GENERATED_PASSWORD; type = "rustdesk" } | ConvertTo-Json
+            $ownerName = ($env:GITHUB_REPOSITORY -split '/')[0]
+            $allowAutoRenew = $true
             try {
-              Invoke-RestMethod -Uri $url -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 30 | Out-Null
-              Write-Host 'Successfully sent RustDesk info to Server.'
-            } catch { Write-Host "Failed to send Server: $($_.Exception.Message)" }
-          }
-
-      - name: Keep session alive
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $hours = 3
-          try { $hours = [int]'${{ github.event.inputs.hours }}' } catch {}
-          if ($hours -lt 1) { $hours = 1 }
-          if ($hours -gt 5) { $hours = 5 }
-          
-          $end = (Get-Date).AddHours($hours)
-          Write-Host "Session ends at: $end"
-          
-          while ((Get-Date) -lt $end) {
-            $svc = Get-Service -Name RustDesk -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -ne 'Running') {
-              Start-Service -Name RustDesk -ErrorAction SilentlyContinue
+              $usrObj = Invoke-RestMethod -Uri "https://api.github.com/users/$ownerName" -Headers $hdr -TimeoutSec 15
+              if ($usrObj -and $usrObj.created_at) {
+                $ageDays = ([DateTime]::UtcNow - [DateTime]::Parse($usrObj.created_at).ToUniversalTime()).TotalDays
+                if ($ageDays -lt 7) {
+                  Write-Host "Thông báo: Tài khoản mới dưới 7 ngày — tự động tiếp tục đã tắt. Vui lòng khởi động thủ công."
+                  $allowAutoRenew = $false
+                }
+              }
+            } catch {}
+            if ($allowAutoRenew) {
+              Start-Sleep -Seconds (Get-Random -Minimum 15 -Maximum 26)
+              Invoke-RestMethod -Uri "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/actions/workflows/rdp-6h.yml/dispatches" `
+                -Headers $hdr -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 20 | Out-Null
+              Write-Host 'Phiên tiếp theo đã được lên lịch tự động.'
             }
-            
-            $remain = $end - (Get-Date)
-            Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
-            Start-Sleep -Seconds 60
+          } catch {
+            Write-Host "Bỏ qua tự động tiếp tục: $($_.Exception.Message)"
           }
-
-      - name: Cleanup
-        if: always()
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Remove-Item -Path "$env:TEMP_DIR\*" -Recurse -Force -ErrorAction SilentlyContinue
+          
