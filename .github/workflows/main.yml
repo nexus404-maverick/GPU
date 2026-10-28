@@ -76,9 +76,9 @@ jobs:
           [System.Environment]::SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1", "Machine")
           [System.Environment]::SetEnvironmentVariable("MESA_GL_VERSION_OVERRIDE", "4.6", "Machine")
           [System.Environment]::SetEnvironmentVariable("MESA_GLSL_VERSION_OVERRIDE", "460", "Machine")
-          Write-Host "✅ Mesa3D installed."
+          Write-Host "Mesa3D installed successfully."
 
-      - name: Install RustDesk (Bản sửa lỗi treo GUI)
+      - name: Install RustDesk (Fix GUI Hang)
         shell: powershell
         timeout-minutes: 10
         run: |
@@ -88,14 +88,11 @@ jobs:
           Write-Host "Downloading RustDesk 1.5.0..."
           Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.exe" -OutFile $installer -UseBasicParsing
           
-          Write-Host "Starting silent install (KHÔNG DÙNG -Wait)..."
-          # Bỏ -Wait để không bị treo vô hạn
+          Write-Host "Starting silent install (NO -Wait)..."
           Start-Process -FilePath $installer -ArgumentList "--silent-install"
           
-          # Đợi 15 giây cho nó cài đặt
           Start-Sleep -Seconds 15
           
-          # TIÊU DIỆT GUI (Nguyên nhân gây treo)
           Write-Host "Killing GUI processes to prevent hang..."
           Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
           Stop-Process -Name "rustdesk-installer" -Force -ErrorAction SilentlyContinue
@@ -130,7 +127,7 @@ jobs:
           }
           
           if (-not $rustdeskId) { throw "Failed to get RustDesk ID." }
-          Write-Host "✅ RustDesk ID obtained: $rustdeskId"
+          Write-Host "RustDesk ID obtained: $rustdeskId"
           "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
 
       - name: Publish Connection Information
@@ -142,9 +139,9 @@ jobs:
             "- RustDesk ID: $env:RUSTDESK_ID",
             "- Password: $env:GENERATED_PASSWORD",
             "",
-            "**Hướng dẫn kết nối:**",
-            "1. Mở app RustDesk trên điện thoại/máy tính.",
-            "2. Nhập ID và Password ở trên để kết nối."
+            "**Huong dan ket noi:**",
+            "1. Mo app RustDesk tren thiet bi.",
+            "2. Nhap ID va Password o tren de ket noi."
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
