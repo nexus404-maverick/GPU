@@ -3,6 +3,9 @@ name: RDP via Pinggy Tunnel
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   secure-rdp:
     runs-on: windows-latest
@@ -12,107 +15,151 @@ jobs:
       - name: Configure Core RDP Settings
         shell: powershell
         run: |
-          # Bật RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          # Tắt NLA để tương thích với nhiều app RDP trên điện thoại
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          
-          # Mở cổng Firewall
+          $ErrorActionPreference = 'Stop'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SecurityLayer' -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Allow" | Out-Null
-          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
-          
-          Restart-Service -Name TermService -Force
-          Write-Host "✅ RDP Enabled."
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService -ErrorAction SilentlyContinue
+          Write-Host 'RDP configured.'
 
-      - name: Create RDP User
+      - name: Create RDP User with Special-Character Password
         shell: powershell
         run: |
-          # Tắt chính sách mật khẩu phức tạp
-          $seceditFile = "$env:TEMP\secpol.inf"
-          $seceditContent = @("[Unicode]", "Unicode=yes", "[System Access]", "PasswordComplexity = 0", "MinimumPasswordLength = 0")
-          Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
-          $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
-          Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
-
-          # Tạo mật khẩu ngẫu nhiên
-          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | % {[char]$_})
-          
-          # Tạo user
+          $ErrorActionPreference = 'Stop'
+          $lower = 'abcdefghijkmnopqrstuvwxyz'
+          $upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+          $digits = '23456789'
+          $special = '!@#$%*-_=+?'
+          $all = $lower + $upper + $digits + $special
+          $chars = @(
+            $lower[(Get-Random -Maximum $lower.Length)]
+            $upper[(Get-Random -Maximum $upper.Length)]
+            $digits[(Get-Random -Maximum $digits.Length)]
+            $special[(Get-Random -Maximum $special.Length)]
+          )
+          1..12 | ForEach-Object { $chars += $all[(Get-Random -Maximum $all.Length)] }
+          $password = -join ($chars | Sort-Object { Get-Random })
+          $username = 'GPUUser'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "GPUUser" -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Administrators" -Member "GPUUser" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "GPUUser" -ErrorAction SilentlyContinue
-          
+          $existing = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+          if ($null -eq $existing) {
+            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          } else {
+            Set-LocalUser -Name $username -Password $securePass
+            Enable-LocalUser -Name $username -ErrorAction SilentlyContinue
+          }
+          Add-LocalGroupMember -Group 'Administrators' -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $username -ErrorAction SilentlyContinue
           "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-          Write-Host "✅ User GPUUser Created."
+          "RDP_USERNAME=$username" >> $env:GITHUB_ENV
+          Write-Host 'GPUUser created/updated. Password includes a special character; value hidden from logs.'
+
+      - name: Download, Extract and Validate Mesa3D (REQUIRED)
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $workDir = 'C:\Layer7'
+          $tempDir = Join-Path $workDir 'temp'
+          $mesaDir = Join-Path $workDir 'mesa3d'
+          New-Item -ItemType Directory -Path $tempDir,$mesaDir -Force | Out-Null
+
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest' -Headers @{ 'User-Agent' = 'Layer7-RDP-Workflow' }
+          $asset = $release.assets | Where-Object { $_.name -match '^mesa3d-.*-release-msvc\.7z$' } | Select-Object -First 1
+          if (-not $asset) { throw 'Required Mesa3D release-msvc archive not found. Cannot continue without Mesa3D.' }
+
+          $archive = Join-Path $tempDir $asset.name
+          Write-Host "Downloading Mesa3D $($release.tag_name)..."
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
+          if (-not (Test-Path $archive) -or (Get-Item $archive).Length -lt 1MB) { throw 'Mesa3D archive is missing or invalid.' }
+
+          $sevenZip = @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $sevenZip) {
+            if (Get-Command choco.exe -ErrorAction SilentlyContinue) {
+              & choco install 7zip -y --no-progress
+            } elseif (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+              & winget install --id 7zip.7zip --exact --silent --accept-package-agreements --accept-source-agreements
+            }
+            $sevenZip = @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") |
+              Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $sevenZip) { throw '7-Zip unavailable; Mesa3D is required and will not be skipped.' }
+
+          & $sevenZip x $archive "-o$mesaDir" -y
+          if ($LASTEXITCODE -ne 0) { throw "Mesa3D extraction failed: 7-Zip exit code $LASTEXITCODE" }
+          $dll = Get-ChildItem -Path $mesaDir -Filter 'opengl32.dll' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dll) { $dll = Get-ChildItem -Path $mesaDir -Filter 'libgallium_wgl.dll' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $dll) { throw 'Mesa3D extracted but no expected OpenGL/WGL DLL was found.' }
+          "MESA3D_DIR=$mesaDir" >> $env:GITHUB_ENV
+          "MESA3D_DLL=$($dll.FullName)" >> $env:GITHUB_ENV
+          Write-Host "Mesa3D downloaded and validated. DLL: $($dll.FullName)"
 
       - name: Start Pinggy Tunnel
         shell: powershell
         timeout-minutes: 5
         run: |
-          $ErrorActionPreference = 'Continue'
-          $sshLog = "$env:TEMP\pinggy.log"
-          
-          Write-Host "Starting Pinggy Tunnel..."
-          # Sử dụng SSH có sẵn trên Windows để tạo tunnel, chuyển tiếp cổng 3389
-          # -o StrictHostKeyChecking=no để không bị hỏi Yes/No
-          $cmd = "ssh -p 443 -R0:localhost:3389 -o StrictHostKeyChecking=no a.pinggy.io"
-          
-          # Chạy ngầm và ghi log
-          Start-Process -FilePath "powershell.exe" -ArgumentList "-Command", $cmd -WindowStyle Hidden -RedirectStandardOutput $sshLog
+          $ErrorActionPreference = 'Stop'
+          $sshLog = Join-Path $env:TEMP 'pinggy.log'
+          $sshErr = Join-Path $env:TEMP 'pinggy-error.log'
+          Remove-Item $sshLog,$sshErr -Force -ErrorAction SilentlyContinue
+          $ssh = Get-Command ssh.exe -ErrorAction SilentlyContinue
+          if (-not $ssh) { throw 'OpenSSH client ssh.exe is not installed.' }
 
-          Write-Host "Waiting for Pinggy to initialize (15s)..."
-          Start-Sleep -Seconds 15
-          
-          # Đọc log để lấy địa chỉ tcp://xxx:port
+          $arguments = '-T -p 443 -R 0:localhost:3389 -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 a.pinggy.io'
+          Start-Process -FilePath $ssh.Source -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $sshLog -RedirectStandardError $sshErr | Out-Null
+
           $publicHost = $null
           $publicPort = $null
-          
-          if (Test-Path $sshLog) {
-              $logContent = Get-Content $sshLog -Raw
-              # Regex tìm dạng tcp://rnxyz.a.pinggy.link:12345
-              if ($logContent -match 'tcp://([a-zA-Z0-9\-\.]+):(\d+)') {
-                  $publicHost = $matches[1]
-                  $publicPort = $matches[2]
-              }
+          for ($i = 0; $i -lt 30 -and -not $publicHost; $i++) {
+            Start-Sleep -Seconds 2
+            $logContent = ''
+            if (Test-Path $sshLog) { $logContent += Get-Content $sshLog -Raw -ErrorAction SilentlyContinue }
+            if (Test-Path $sshErr) { $logContent += "`n" + (Get-Content $sshErr -Raw -ErrorAction SilentlyContinue) }
+            if ($logContent -match 'tcp://([a-zA-Z0-9.-]+):(\d{2,5})') {
+              $publicHost = $matches[1]
+              $publicPort = $matches[2]
+            }
           }
-          
-          if ($publicHost -and $publicPort) {
-              "RDP_HOST=$publicHost" >> $env:GITHUB_ENV
-              "RDP_PORT=$publicPort" >> $env:GITHUB_ENV
-              Write-Host "✅ Tunnel Established: $publicHost on port $publicPort"
-          } else {
-              Write-Host "❌ Failed to get Pinggy address. Log output:"
-              Get-Content $sshLog
-              throw "Tunnel failed."
+          if (-not $publicHost -or -not $publicPort) {
+            Write-Host 'Pinggy did not provide a TCP endpoint. Diagnostic output:'
+            if (Test-Path $sshLog) { Get-Content $sshLog }
+            if (Test-Path $sshErr) { Get-Content $sshErr }
+            throw 'Could not discover Pinggy TCP endpoint.'
           }
+          "RDP_HOST=$publicHost" >> $env:GITHUB_ENV
+          "RDP_PORT=$publicPort" >> $env:GITHUB_ENV
+          Write-Host "Pinggy endpoint detected: ${publicHost}:$publicPort"
 
       - name: Publish Connection Details
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           $summary = @(
-            '## 🖥️ RDP Connection Details (Pinggy Tunnel)',
-            "",
-            "**Host (IP):** `$env:RDP_HOST`",
-            "**Port:** `$env:RDP_PORT`",
-            "**Username:** `GPUUser`",
-            "**Password:** `$env:RDP_PASSWORD`",
-            "",
-            "**Hướng dẫn kết nối:**",
-            "1. Mở app RDP (mstsc trên PC, aRDP trên Android).",
-            "2. Ở ô Host/PC Name, nhập: `$env:RDP_HOST`",
-            "3. Ở ô Port (nếu có), nhập: `$env:RDP_PORT`",
-            "4. Điền Username và Password ở trên để kết nối.",
-            "",
-            "> ⚠️ **Lưu ý:** Pinggy bản miễn phí sẽ ngắt kết nối sau 60 phút. Nếu bạn cần dùng 6 tiếng, hãy dùng phương án Tailscale."
+            '# RDP Connection Details (Pinggy Tunnel)',
+            '',
+            "- Host: ``$env:RDP_HOST``",
+            "- Port: ``$env:RDP_PORT``",
+            "- Username: ``$env:RDP_USERNAME``",
+            "- Password: ``$env:RDP_PASSWORD``",
+            '',
+            "Mesa3D folder: ``$env:MESA3D_DIR``",
+            '',
+            'Use these details in your RDP client.',
+            'Security warning: this summary contains credentials. Keep repository/workflow access restricted.',
+            'Pinggy free-tier availability and session duration may vary.'
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          Write-Host 'Connection details published to workflow summary.'
 
       - name: Keep session alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Session Active via Pinggy..."
-              Start-Sleep -Seconds 300
+            Write-Host "[$(Get-Date -Format o)] RDP session active; Mesa3D: $env:MESA3D_DIR"
+            Start-Sleep -Seconds 300
           }
