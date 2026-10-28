@@ -103,12 +103,9 @@ jobs:
               Start-Sleep -Seconds 3
               if (Test-Path $logFile) {
                   $content = Get-Content $logFile -Raw
-                  # Quét tìm địa chỉ dạng https://xxxx.trycloudflare.com
-                  if ($content -match '(https://[a-zA-Z0-9-]+\.trycloudflare\.com)') {
-                      $rawUrl = $Matches[1]
-                      # Bỏ tiền tố https:// để lấy domain (ví dụ: respect-bracelets-consciousness-heard.trycloudflare.com)
-                      $domain = $rawUrl -replace 'https://', ''
-                      # Cloudflare TCP tunnel qua trycloudflare ánh xạ port 3389 vào port công cộng tương ứng (thường cloudflare hiển thị url web nhưng bên dưới là TCP, ta dùng tcp port forward)
+                  # Bắt chính xác tên miền trycloudflare.com xuất hiện trong log
+                  if ($content -match 'https://([a-zA-Z0-9-]+\.trycloudflare\.com)') {
+                      $domain = $Matches[1]
                       $tunnelUrl = "$domain:3389"
                       break
                   }
