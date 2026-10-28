@@ -1,169 +1,118 @@
-name: GPU Cloud PC (AnyDesk + Mesa3D)
+name: RDP via Pinggy Tunnel
 
 on:
   workflow_dispatch:
-    inputs:
-      hours:
-        description: 'Số giờ thuê (1-5)'
-        required: true
-        default: '3'
-        type: string
-
-permissions:
-  actions: write
-  contents: read
 
 jobs:
-  deploy-instance:
-    runs-on: windows-2025
+  secure-rdp:
+    runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v5
-
-      - name: Generate Password
+      - name: Configure Core RDP Settings
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
-          $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-          $password = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-          "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
+          # Bật RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          # Tắt NLA để tương thích với nhiều app RDP trên điện thoại
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          # Mở cổng Firewall
+          netsh advfirewall firewall delete rule name="RDP-Allow" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
+          
+          Restart-Service -Name TermService -Force
+          Write-Host "✅ RDP Enabled."
 
-      - name: Setup Windows Account
+      - name: Create RDP User
         shell: powershell
         run: |
-          try {
-              $seceditFile = "$env:TEMP\secpol.inf"
-              $seceditContent = @("[Unicode]", "Unicode=yes", "[System Access]", "PasswordComplexity = 0", "MinimumPasswordLength = 0")
-              Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
-              $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
-              Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
-              
-              $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
-              $user = Get-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
-              if ($null -eq $user) {
-                New-LocalUser -Name "GPUUser" -Password $secure -PasswordNeverExpires -AccountNeverExpires -FullName 'GPU User' -ErrorAction SilentlyContinue
-              } else {
-                Set-LocalUser -Name "GPUUser" -Password $secure -ErrorAction SilentlyContinue
-              }
-              Add-LocalGroupMember -Group 'Administrators' -Member "GPUUser" -ErrorAction SilentlyContinue
-          } catch { Write-Host "Warning: $_" }
-          exit 0
+          # Tắt chính sách mật khẩu phức tạp
+          $seceditFile = "$env:TEMP\secpol.inf"
+          $seceditContent = @("[Unicode]", "Unicode=yes", "[System Access]", "PasswordComplexity = 0", "MinimumPasswordLength = 0")
+          Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
+          $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
+          Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
 
-      - name: Install Mesa3D (Software GPU)
-        shell: powershell
-        timeout-minutes: 10
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Write-Host "Downloading Mesa3D..."
-          $mesaDir = "C:\Mesa3D"
-          $archive = "$env:TEMP\mesa.7z"
-          New-Item -ItemType Directory -Path $mesaDir -Force | Out-Null
+          # Tạo mật khẩu ngẫu nhiên
+          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | % {[char]$_})
           
-          Invoke-WebRequest -Uri 'https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z' -OutFile $archive -UseBasicParsing -TimeoutSec 300
+          # Tạo user
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "GPUUser" -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "GPUUser" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "GPUUser" -ErrorAction SilentlyContinue
           
-          $sevenZip = "$env:TEMP\7zr.exe"
-          if (-not (Test-Path $sevenZip)) {
-              Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $sevenZip -UseBasicParsing
-          }
-          
-          Write-Host "Extracting Mesa3D..."
-          $process = Start-Process -FilePath $sevenZip -ArgumentList "x `"$archive`" `"-o$mesaDir`" -y" -Wait -PassThru -NoNewWindow
-          if ($process.ExitCode -ne 0) { throw "Failed to extract Mesa3D." }
-          
-          [System.Environment]::SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe", "Machine")
-          [System.Environment]::SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1", "Machine")
-          [System.Environment]::SetEnvironmentVariable("MESA_GL_VERSION_OVERRIDE", "4.6", "Machine")
-          [System.Environment]::SetEnvironmentVariable("MESA_GLSL_VERSION_OVERRIDE", "460", "Machine")
-          Write-Host "Mesa3D installed successfully."
+          "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          Write-Host "✅ User GPUUser Created."
 
-      - name: Install AnyDesk & Retrieve ID
+      - name: Start Pinggy Tunnel
         shell: powershell
         timeout-minutes: 5
         run: |
-          $ErrorActionPreference = 'Stop'
-          Write-Host "Downloading AnyDesk..."
-          $anydeskInstaller = "$env:TEMP\AnyDesk.exe"
-          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile $anydeskInstaller -UseBasicParsing
+          $ErrorActionPreference = 'Continue'
+          $sshLog = "$env:TEMP\pinggy.log"
           
-          Write-Host "Installing AnyDesk silently..."
-          # Cài đặt AnyDesk vào Program Files
-          Start-Process -FilePath $anydeskInstaller -ArgumentList "--install `"C:\Program Files\AnyDesk`" --silent" -Wait
+          Write-Host "Starting Pinggy Tunnel..."
+          # Sử dụng SSH có sẵn trên Windows để tạo tunnel, chuyển tiếp cổng 3389
+          # -o StrictHostKeyChecking=no để không bị hỏi Yes/No
+          $cmd = "ssh -p 443 -R0:localhost:3389 -o StrictHostKeyChecking=no a.pinggy.io"
           
-          $anydeskExe = "C:\Program Files\AnyDesk\AnyDesk.exe"
-          if (-not (Test-Path $anydeskExe)) { throw "AnyDesk.exe not found." }
-          
-          Write-Host "Setting AnyDesk Password..."
-          Start-Process -FilePath $anydeskExe -ArgumentList "--set-password `"$env:GENERATED_PASSWORD`"" -Wait
-          Start-Sleep -Seconds 3
-          
-          Write-Host "Starting AnyDesk Service..."
-          Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 5
+          # Chạy ngầm và ghi log
+          Start-Process -FilePath "powershell.exe" -ArgumentList "-Command", $cmd -WindowStyle Hidden -RedirectStandardOutput $sshLog
 
-          Write-Host "Getting AnyDesk ID..."
-          $anydeskId = $null
-          for ($i = 1; $i -le 10 -and -not $anydeskId; $i++) {
-            $idOutput = @(& $anydeskExe --get-id 2>&1)
-            foreach ($line in $idOutput) {
-              # AnyDesk ID thường có 9 hoặc 10 chữ số
-              if (([string]$line).Trim() -match '^\d{9,10}$') { 
-                  $anydeskId = $matches[0]
-                  break 
+          Write-Host "Waiting for Pinggy to initialize (15s)..."
+          Start-Sleep -Seconds 15
+          
+          # Đọc log để lấy địa chỉ tcp://xxx:port
+          $publicHost = $null
+          $publicPort = $null
+          
+          if (Test-Path $sshLog) {
+              $logContent = Get-Content $sshLog -Raw
+              # Regex tìm dạng tcp://rnxyz.a.pinggy.link:12345
+              if ($logContent -match 'tcp://([a-zA-Z0-9\-\.]+):(\d+)') {
+                  $publicHost = $matches[1]
+                  $publicPort = $matches[2]
               }
-            }
-            if (-not $anydeskId) { 
-                Write-Host "Attempt $i/10: ID not ready yet, waiting 3s..."
-                Start-Sleep -Seconds 3 
-            }
           }
           
-          if (-not $anydeskId) { throw "Failed to get AnyDesk ID." }
-          
-          Write-Host "AnyDesk ID obtained: $anydeskId"
-          "ANYDESK_ID=$anydeskId" >> $env:GITHUB_ENV
+          if ($publicHost -and $publicPort) {
+              "RDP_HOST=$publicHost" >> $env:GITHUB_ENV
+              "RDP_PORT=$publicPort" >> $env:GITHUB_ENV
+              Write-Host "✅ Tunnel Established: $publicHost on port $publicPort"
+          } else {
+              Write-Host "❌ Failed to get Pinggy address. Log output:"
+              Get-Content $sshLog
+              throw "Tunnel failed."
+          }
 
-      - name: Publish Connection Information
+      - name: Publish Connection Details
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Continue'
           $summary = @(
-            '## GPU Cloud PC (AnyDesk)',
-            "- AnyDesk ID: $env:ANYDESK_ID",
-            "- Password: $env:GENERATED_PASSWORD",
+            '## 🖥️ RDP Connection Details (Pinggy Tunnel)',
             "",
-            "**Huong dan ket noi:**",
-            "1. Mo app AnyDesk tren thiet bi.",
-            "2. Nhap ID va Password o tren de ket noi."
+            "**Host (IP):** `$env:RDP_HOST`",
+            "**Port:** `$env:RDP_PORT`",
+            "**Username:** `GPUUser`",
+            "**Password:** `$env:RDP_PASSWORD`",
+            "",
+            "**Hướng dẫn kết nối:**",
+            "1. Mở app RDP (mstsc trên PC, aRDP trên Android).",
+            "2. Ở ô Host/PC Name, nhập: `$env:RDP_HOST`",
+            "3. Ở ô Port (nếu có), nhập: `$env:RDP_PORT`",
+            "4. Điền Username và Password ở trên để kết nối.",
+            "",
+            "> ⚠️ **Lưu ý:** Pinggy bản miễn phí sẽ ngắt kết nối sau 60 phút. Nếu bạn cần dùng 6 tiếng, hãy dùng phương án Tailscale."
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       - name: Keep session alive
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Continue'
-          $hours = 3
-          try { $hours = [int]'${{ github.event.inputs.hours }}' } catch {}
-          if ($hours -lt 1) { $hours = 1 }
-          if ($hours -gt 5) { $hours = 5 }
-          
-          $end = (Get-Date).AddHours($hours)
-          Write-Host "Session ends at: $end"
-          
-          while ((Get-Date) -lt $end) {
-            $svc = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -ne 'Running') {
-              Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
-            }
-            $remain = $end - (Get-Date)
-            Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
-            Start-Sleep -Seconds 60
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Session Active via Pinggy..."
+              Start-Sleep -Seconds 300
           }
-
-      - name: Cleanup
-        if: always()
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
