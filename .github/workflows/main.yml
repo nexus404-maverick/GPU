@@ -1,4 +1,4 @@
-name: GPU Cloud PC (RDP)
+name: GPU Cloud PC (RDP + Mesa3D)
 
 on:
   workflow_dispatch:
@@ -72,6 +72,42 @@ jobs:
           }
           exit 0
 
+      # ============================================================
+      # CÀI ĐẶT MESA3D (SOFTWARE GPU) CHO GAME VÀ ĐỒ HỌA
+      # ============================================================
+      - name: Install Mesa3D (Software GPU)
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "Downloading Mesa3D..."
+          
+          $mesaDir = "C:\Mesa3D"
+          $archive = "$env:TEMP\mesa.7z"
+          New-Item -ItemType Directory -Path $mesaDir -Force | Out-Null
+          
+          # Tải gói Mesa3D mới nhất (release-msvc)
+          Invoke-WebRequest -Uri 'https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z' -OutFile $archive -UseBasicParsing -TimeoutSec 300
+          
+          # Tải 7zr.exe để giải nén
+          $sevenZip = "$env:TEMP\7zr.exe"
+          if (-not (Test-Path $sevenZip)) {
+              Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $sevenZip -UseBasicParsing
+          }
+          
+          Write-Host "Extracting Mesa3D..."
+          $process = Start-Process -FilePath $sevenZip -ArgumentList "x `"$archive`" `"-o$mesaDir`" -y" -Wait -PassThru -NoNewWindow
+          
+          if ($process.ExitCode -ne 0) { throw "Failed to extract Mesa3D." }
+          
+          # Thiết lập biến môi trường để game nhận diện được GPU phần mềm
+          [System.Environment]::SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe", "Machine")
+          [System.Environment]::SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1", "Machine")
+          [System.Environment]::SetEnvironmentVariable("MESA_GL_VERSION_OVERRIDE", "4.6", "Machine")
+          [System.Environment]::SetEnvironmentVariable("MESA_GLSL_VERSION_OVERRIDE", "460", "Machine")
+          
+          Write-Host "✅ Mesa3D đã được cài đặt tại $mesaDir"
+
       - name: Setup Cloudflare Tunnel
         shell: powershell
         timeout-minutes: 5
@@ -82,27 +118,38 @@ jobs:
           Invoke-WebRequest -Uri $cfUrl -OutFile "$env:TEMP\cloudflared.exe" -UseBasicParsing
           
           Write-Host "Starting Cloudflare Tunnel (RDP port 3389)..."
-          # Chạy cloudflared tunnel trỏ vào cổng RDP 3389
-          $cfLog = "$env:TEMP\cf.log"
-          Start-Process -FilePath "$env:TEMP\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput $cfLog
-          
-          # Đợi Cloudflared khởi tạo và sinh link
-          Start-Sleep -Seconds 15
-          
-          # Đọc file log để trích xuất địa chỉ host:port
+          $process = New-Object System.Diagnostics.Process
+          $process.StartInfo.FileName = "$env:TEMP\cloudflared.exe"
+          $process.StartInfo.Arguments = "tunnel --url tcp://localhost:3389"
+          $process.StartInfo.UseShellExecute = $false
+          $process.StartInfo.RedirectStandardOutput = $true
+          $process.StartInfo.RedirectStandardError = $true
+          $process.StartInfo.CreateNoWindow = $true
+          $process.Start() | Out-Null
+
           $publicAddress = $null
-          if (Test-Path $cfLog) {
-              $logContent = Get-Content $cfLog -Raw
-              # Tìm dòng có dạng: https://random-name.trycloudflare.com hoặc tcp://...
-              if ($logContent -match 'https?://([a-zA-Z0-9\-]+\.trycloudflare\.com)') {
-                  $publicAddress = $matches[0]
+          $startTime = Get-Date
+
+          while ((Get-Date) - $startTime).TotalSeconds -lt 30) {
+              if (-not $process.StandardError.EndOfStream) {
+                  $line = $process.StandardError.ReadLine()
+                  if ($line) {
+                      Write-Host $line
+                      if ($line -match 'https://([a-zA-Z0-9\-]+\.trycloudflare\.com)') {
+                          $publicAddress = $matches[0]
+                          break
+                      }
+                  }
+              } else {
+                  Start-Sleep -Milliseconds 500
               }
           }
-          
-          if (-not $publicAddress) { throw "Failed to get Cloudflare public address. Check logs." }
+
+          if (-not $publicAddress) { throw "Failed to get Cloudflare public address." }
           
           Write-Host "RDP Address obtained: $publicAddress"
           "CF_ADDRESS=$publicAddress" >> $env:GITHUB_ENV
+          $process.Id | Out-File "$env:TEMP\cf_pid.txt"
 
       - name: Publish RDP Information
         shell: powershell
@@ -111,7 +158,7 @@ jobs:
           $nodeId = [string]'${{ github.event.inputs.instance_number }}'
           
           $summary = @(
-            '## GPU Cloud PC (RDP - Cloudflare Tunnel)',
+            '## GPU Cloud PC (RDP + Mesa3D)',
             "- Session: $nodeId",
             "- Address (Host): $env:CF_ADDRESS",
             "- Username: GPUUser",
@@ -119,8 +166,10 @@ jobs:
             "",
             "**Hướng dẫn kết nối:**",
             "1. Mở Remote Desktop Connection (mstsc) hoặc aRDP.",
-            "2. Nhập Address: $env:CF_ADDRESS (Lưu ý có thể có thêm port đằng sau)",
-            "3. Nhập User và Pass ở trên."
+            "2. Nhập Address: $env:CF_ADDRESS (cổng 443)",
+            "3. Nhập User và Pass ở trên.",
+            "",
+            "**Mesa3D đã được cài đặt sẵn sàng cho Minecraft, Blender, v.v.**"
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
@@ -141,10 +190,9 @@ jobs:
             if ($svc -and $svc.Status -ne 'Running') {
               Start-Service -Name TermService -ErrorAction SilentlyContinue
             }
-            # Đảm bảo cloudflared luôn chạy
             $cfProc = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
             if (-not $cfProc) {
-                Start-Process -FilePath "$env:TEMP\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP\cf.log"
+                Start-Process -FilePath "$env:TEMP\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -WindowStyle Hidden
             }
             
             $remain = $end - (Get-Date)
