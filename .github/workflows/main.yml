@@ -104,80 +104,50 @@ jobs:
         shell: powershell
         timeout-minutes: 5
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
+          $sshLog = "$env:TEMP\pinggy_out.log"
+          $sshErr = "$env:TEMP\pinggy_err.log"
+          New-Item -ItemType File -Path $sshLog, $sshErr -Force | Out-Null
+          
+          Write-Host "Starting Pinggy Tunnel..."
+          # Sử dụng SSH có sẵn trên Windows để tạo tunnel
+          $proc = Start-Process -FilePath "ssh" -ArgumentList "-p 443 -R0:localhost:3389 -o StrictHostKeyChecking=no a.pinggy.io" -WindowStyle Hidden -RedirectStandardOutput $sshLog -RedirectStandardError $sshErr -PassThru
 
-          $ssh = Get-Command ssh.exe -ErrorAction SilentlyContinue
-          if (-not $ssh) {
-            throw 'OpenSSH ssh.exe is not installed.'
-          }
-
-          $sshLog = Join-Path $env:TEMP 'pinggy.log'
-          $sshErr = Join-Path $env:TEMP 'pinggy-error.log'
-          Remove-Item $sshLog,$sshErr -Force -ErrorAction SilentlyContinue
-
-          Write-Host 'Starting Pinggy TCP tunnel to RDP port 3389...'
-
-          # Use Pinggy's documented TCP endpoint and IPv4 loopback on Windows.
-          $arguments = @(
-            '-T',
-            '-p', '443',
-            '-R', '0:127.0.0.1:3389',
-            '-o', 'StrictHostKeyChecking=accept-new',
-            '-o', 'ServerAliveInterval=30',
-            '-o', 'ServerAliveCountMax=3',
-            'tcp@free.pinggy.io'
-          )
-
-          $process = Start-Process `
-            -FilePath $ssh.Source `
-            -ArgumentList $arguments `
-            -PassThru `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput $sshLog `
-            -RedirectStandardError $sshErr
-
+          Write-Host "Waiting for Pinggy to initialize (Max 30s)..."
           $publicHost = $null
           $publicPort = $null
-          $logContent = ''
-
-          # Allow up to 90 seconds for the tunnel to report its endpoint.
-          for ($i = 0; $i -lt 45; $i++) {
-            Start-Sleep -Seconds 2
-
-            $logContent = ''
-            if (Test-Path $sshLog) {
-              $logContent += (Get-Content $sshLog -Raw -ErrorAction SilentlyContinue)
-            }
-            if (Test-Path $sshErr) {
-              $logContent += "`n" + (Get-Content $sshErr -Raw -ErrorAction SilentlyContinue)
-            }
-
-            if ($logContent -match '(?i)tcp://([a-z0-9.-]+):(\d{2,5})') {
-              $publicHost = $matches[1]
-              $publicPort = $matches[2]
-              break
-            }
-
-            if ($process.HasExited) {
-              Write-Host "SSH process exited with code $($process.ExitCode)."
-              break
-            }
+          
+          for ($i = 1; $i -le 15; $i++) {
+              Start-Sleep -Seconds 2
+              
+              if ($proc.HasExited) {
+                  Write-Host "SSH process exited prematurely."
+                  break
+              }
+              
+              # Đọc cả 2 file log
+              $out = Get-Content $sshLog -Raw -ErrorAction SilentlyContinue
+              $err = Get-Content $sshErr -Raw -ErrorAction SilentlyContinue
+              $combined = "$out`n$err"
+              
+              # Regex tìm dạng tcp://xxxx:port
+              if ($combined -match 'tcp://([a-zA-Z0-9\-\.]+):(\d+)') {
+                  $publicHost = $matches[1]
+                  $publicPort = $matches[2]
+                  break
+              }
           }
-
-          if (-not $publicHost -or -not $publicPort) {
-            Write-Host 'Could not find the TCP endpoint. Pinggy/SSH output follows:'
-            if ($logContent) {
-              Write-Host $logContent
-            } else {
-              Write-Host 'No output received from SSH.'
-            }
-            throw 'Pinggy tunnel failed. Review the diagnostic output above.'
+          
+          if ($publicHost -and $publicPort) {
+              "RDP_HOST=$publicHost" >> $env:GITHUB_ENV
+              "RDP_PORT=$publicPort" >> $env:GITHUB_ENV
+              Write-Host "✅ Tunnel Established: $publicHost on port $publicPort"
+          } else {
+              Write-Host "❌ Failed to get Pinggy address. Log output:"
+              Write-Host $combined
+              if ($proc) { Stop-Process -Id $proc.Id -Force }
+              throw "Tunnel failed. Please check the log above."
           }
-
-          "RDP_HOST=$publicHost" >> $env:GITHUB_ENV
-          "RDP_PORT=$publicPort" >> $env:GITHUB_ENV
-
-          Write-Host "Pinggy TCP endpoint: ${publicHost}:$publicPort"
 
 
       - name: Publish Connection Details
