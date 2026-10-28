@@ -1,4 +1,4 @@
-name: GPU Cloud PC (RustDesk + Mesa3D)
+name: GPU Cloud PC (AnyDesk + Mesa3D)
 
 on:
   workflow_dispatch:
@@ -78,100 +78,63 @@ jobs:
           [System.Environment]::SetEnvironmentVariable("MESA_GLSL_VERSION_OVERRIDE", "460", "Machine")
           Write-Host "Mesa3D installed successfully."
 
-      - name: Install RustDesk & Retrieve ID
+      - name: Install AnyDesk & Retrieve ID
         shell: powershell
-        timeout-minutes: 15
+        timeout-minutes: 5
         run: |
-          $ErrorActionPreference = 'Continue'
-          $installer = "$env:TEMP\rustdesk.exe"
+          $ErrorActionPreference = 'Stop'
+          Write-Host "Downloading AnyDesk..."
+          $anydeskInstaller = "$env:TEMP\AnyDesk.exe"
+          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile $anydeskInstaller -UseBasicParsing
           
-          Write-Host "Downloading RustDesk 1.5.0..."
-          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.exe" -OutFile $installer -UseBasicParsing
+          Write-Host "Installing AnyDesk silently..."
+          # Cài đặt AnyDesk vào Program Files
+          Start-Process -FilePath $anydeskInstaller -ArgumentList "--install `"C:\Program Files\AnyDesk`" --silent" -Wait
           
-          Write-Host "Starting silent install..."
-          Start-Process -FilePath $installer -ArgumentList "--silent-install"
-          Start-Sleep -Seconds 15
+          $anydeskExe = "C:\Program Files\AnyDesk\AnyDesk.exe"
+          if (-not (Test-Path $anydeskExe)) { throw "AnyDesk.exe not found." }
           
-          Write-Host "Killing GUI processes..."
-          Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
-          Stop-Process -Name "rustdesk-installer" -Force -ErrorAction SilentlyContinue
+          Write-Host "Setting AnyDesk Password..."
+          Start-Process -FilePath $anydeskExe -ArgumentList "--set-password `"$env:GENERATED_PASSWORD`"" -Wait
           Start-Sleep -Seconds 3
-
-          $rustdeskExe = "$env:ProgramFiles\RustDesk\rustdesk.exe"
-          if (-not (Test-Path $rustdeskExe)) {
-              $rustdeskExe = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter rustdesk.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
-          }
-          if (-not $rustdeskExe) { throw "rustdesk.exe not found." }
           
-          Write-Host "Installing RustDesk Service (No -Wait to prevent hang)..."
-          Start-Process -FilePath $rustdeskExe -ArgumentList '--install-service'
+          Write-Host "Starting AnyDesk Service..."
+          Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 5
-          
-          Write-Host "Starting RustDesk Service using sc.exe..."
-          $null = sc.exe start RustDesk
-          Start-Sleep -Seconds 10
-          
-          Write-Host "Setting RustDesk Password (retrying)..."
-          for ($p = 1; $p -le 3; $p++) {
-              Start-Process -FilePath $rustdeskExe -ArgumentList "--password `"$env:GENERATED_PASSWORD`"" -Wait
-              Start-Sleep -Seconds 2
-          }
 
-          Write-Host "Getting RustDesk ID (waiting up to 60s)..."
-          $rustdeskId = $null
-          
-          # Đường dẫn file cấu hình của RustDesk
-          $configPaths = @(
-            "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-            "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
-            "$env:APPDATA\RustDesk\config\RustDesk.toml"
-          )
-
-          for ($i = 1; $i -le 20 -and -not $rustdeskId; $i++) {
-            # Cách 1: Thử lấy bằng CLI
-            $idOutput = @(& $rustdeskExe --get-id 2>&1)
+          Write-Host "Getting AnyDesk ID..."
+          $anydeskId = $null
+          for ($i = 1; $i -le 10 -and -not $anydeskId; $i++) {
+            $idOutput = @(& $anydeskExe --get-id 2>&1)
             foreach ($line in $idOutput) {
-              if (([string]$line).Trim() -match '^\d{6,20}$') { 
-                  $rustdeskId = $matches[0]
+              # AnyDesk ID thường có 9 hoặc 10 chữ số
+              if (([string]$line).Trim() -match '^\d{9,10}$') { 
+                  $anydeskId = $matches[0]
                   break 
               }
             }
-            
-            # Cách 2: Nếu CLI thất bại, chọc thẳng vào file config
-            if (-not $rustdeskId) {
-                foreach ($path in $configPaths) {
-                    if (Test-Path $path) {
-                        $content = Get-Content $path -Raw -ErrorAction SilentlyContinue
-                        if ($content -match 'id\s*=\s*"(\d{6,20})"') {
-                            $rustdeskId = $matches[1]
-                            break
-                        }
-                    }
-                }
-            }
-            
-            if (-not $rustdeskId) { 
-                Write-Host "Attempt $i/20: ID not ready yet, waiting 3s..."
+            if (-not $anydeskId) { 
+                Write-Host "Attempt $i/10: ID not ready yet, waiting 3s..."
                 Start-Sleep -Seconds 3 
             }
           }
           
-          if (-not $rustdeskId) { throw "Failed to get RustDesk ID after 60s." }
+          if (-not $anydeskId) { throw "Failed to get AnyDesk ID." }
           
-          Write-Host "RustDesk ID obtained: $rustdeskId"
-          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
+          Write-Host "AnyDesk ID obtained: $anydeskId"
+          "ANYDESK_ID=$anydeskId" >> $env:GITHUB_ENV
 
       - name: Publish Connection Information
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
           $summary = @(
-            '## GPU Cloud PC (RustDesk)',
-            "- RustDesk ID: $env:RUSTDESK_ID",
+            '## GPU Cloud PC (AnyDesk)',
+            "- AnyDesk ID: $env:ANYDESK_ID",
             "- Password: $env:GENERATED_PASSWORD",
             "",
             "**Huong dan ket noi:**",
-            "1. Mo app RustDesk tren thiet bi.",
+            "1. Mo app AnyDesk tren thiet bi.",
             "2. Nhap ID va Password o tren de ket noi."
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
@@ -189,9 +152,9 @@ jobs:
           Write-Host "Session ends at: $end"
           
           while ((Get-Date) -lt $end) {
-            $svc = Get-Service -Name RustDesk -ErrorAction SilentlyContinue
+            $svc = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
             if ($svc -and $svc.Status -ne 'Running') {
-              $null = sc.exe start RustDesk
+              Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
             }
             $remain = $end - (Get-Date)
             Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
