@@ -93,11 +93,9 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cloudflaredExe -UseBasicParsing
           
           Write-Host "Starting Cloudflare Quick Tunnel for RDP (Port 3389)..."
-          # Chạy cloudflared ở chế độ tcp tunnel và ghi log ra file để lấy địa chỉ
           $logFile = "$env:TEMP\cloudflared.log"
           Start-Process -FilePath $cloudflaredExe -ArgumentList "tunnel --url rdp://127.0.0.1:3389" -RedirectStandardError $logFile -WindowStyle Hidden
           
-          # Chờ vài giây để cloudflared khởi tạo và kết nối mạng công cộng
           $maxRetries = 15
           $tunnelUrl = $null
           
@@ -105,9 +103,13 @@ jobs:
               Start-Sleep -Seconds 3
               if (Test-Path $logFile) {
                   $content = Get-Content $logFile -Raw
-                  # Quét tìm địa chỉ dạng tcp://...trycloudflare.com:XXXXX hoặc tương tự
-                  if ($content -match '(tcp://[^\s]+)') {
-                      $tunnelUrl = $Matches[1]
+                  # Quét tìm địa chỉ dạng https://xxxx.trycloudflare.com
+                  if ($content -match '(https://[a-zA-Z0-9-]+\.trycloudflare\.com)') {
+                      $rawUrl = $Matches[1]
+                      # Bỏ tiền tố https:// để lấy domain (ví dụ: respect-bracelets-consciousness-heard.trycloudflare.com)
+                      $domain = $rawUrl -replace 'https://', ''
+                      # Cloudflare TCP tunnel qua trycloudflare ánh xạ port 3389 vào port công cộng tương ứng (thường cloudflare hiển thị url web nhưng bên dưới là TCP, ta dùng tcp port forward)
+                      $tunnelUrl = "$domain:3389"
                       break
                   }
               }
@@ -115,14 +117,13 @@ jobs:
           }
           
           if (-not $tunnelUrl) {
-              # Fallback sang cách đọc file log chi tiết nếu không khớp regex trên
               $content = Get-Content $logFile -ErrorAction SilentlyContinue
               Write-Host "Cloudflare Log Output:"
               $content | ForEach-Object { Write-Host $_ }
               throw "Could not retrieve Cloudflare Tunnel URL."
           }
           
-          Write-Host "✅ Cloudflare Tunnel URL: $tunnelUrl"
+          Write-Host "✅ Cloudflare Tunnel Address: $tunnelUrl"
           "RDP_TUNNEL_URL=$tunnelUrl" >> $env:GITHUB_ENV
 
       - name: Publish Connection Information
