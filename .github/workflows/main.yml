@@ -1,4 +1,4 @@
-name: GPU Cloud PC (RustDesk + Mesa3D)
+name: GPU Cloud PC (Cloudflare RDP)
 
 on:
   workflow_dispatch:
@@ -26,34 +26,33 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          # Chỉ dùng chữ và số để tránh lỗi cú pháp CLI
           $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
           $password = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
           "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
+          Write-Host "✅ Generated password for RDP user."
 
-      - name: Setup Windows Account
+      - name: Setup Windows Account & Enable RDP
         shell: powershell
         run: |
-          try {
-              $seceditFile = "$env:TEMP\secpol.inf"
-              $seceditContent = @(
-                  "[Unicode]", "Unicode=yes", "[System Access]",
-                  "PasswordComplexity = 0", "MinimumPasswordLength = 0"
-              )
-              Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
-              $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
-              Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
-              
-              $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
-              $user = Get-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
-              if ($null -eq $user) {
-                New-LocalUser -Name "GPUUser" -Password $secure -PasswordNeverExpires -AccountNeverExpires -FullName 'GPU User' -ErrorAction SilentlyContinue
-              } else {
-                Set-LocalUser -Name "GPUUser" -Password $secure -ErrorAction SilentlyContinue
-              }
-              Add-LocalGroupMember -Group 'Administrators' -Member "GPUUser" -ErrorAction SilentlyContinue
-          } catch { Write-Host "Warning: $_" }
-          exit 0
+          $ErrorActionPreference = 'Stop'
+          
+          # Tạo tài khoản Windows (GPUUser)
+          $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
+          $user = Get-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
+          if ($null -eq $user) {
+              New-LocalUser -Name "GPUUser" -Password $secure -PasswordNeverExpires -AccountNeverExpires -FullName 'GPU User'
+          } else {
+              Set-LocalUser -Name "GPUUser" -Password $secure
+          }
+          Add-LocalGroupMember -Group 'Administrators' -Member "GPUUser"
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member "GPUUser"
+
+          # Bật tính năng Remote Desktop (RDP)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+          
+          Write-Host "✅ RDP Enabled and Account Configured."
 
       - name: Install Mesa3D (Software GPU)
         shell: powershell
@@ -82,94 +81,64 @@ jobs:
           [System.Environment]::SetEnvironmentVariable("MESA_GLSL_VERSION_OVERRIDE", "460", "Machine")
           Write-Host "✅ Mesa3D installed."
 
-      - name: Download RustDesk
+      - name: Setup Cloudflare Tunnel & Expose RDP
         shell: powershell
-        timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "Downloading RustDesk 1.5.0..."
-          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.5.0/rustdesk-1.5.0-x86_64.exe" -OutFile "$env:TEMP\rustdesk.exe" -UseBasicParsing
-
-      - name: Install RustDesk Silently
-        shell: powershell
-        timeout-minutes: 5
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Write-Host "Installing RustDesk..."
-          # Cài đặt ngầm, ép timeout 3 phút để tránh treo
-          $p = Start-Process -FilePath "$env:TEMP\rustdesk.exe" -ArgumentList '--silent-install' -Wait -PassThru -WindowStyle Hidden
+          Write-Host "Downloading Cloudflare Tunnel (cloudflared)..."
+          $cloudflaredDir = "C:\Cloudflared"
+          New-Item -ItemType Directory -Path $cloudflaredDir -Force | Out-Null
+          $cloudflaredExe = "$cloudflaredDir\cloudflared.exe"
           
-          # Diệt GUI nếu có để tránh treo Headless
-          Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 3
-
-      - name: Install RustDesk Service
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $rustdeskExe = "$env:ProgramFiles\RustDesk\rustdesk.exe"
-          if (-not (Test-Path $rustdeskExe)) {
-              $rustdeskExe = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter rustdesk.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
-          }
-          if (-not $rustdeskExe) { throw "rustdesk.exe not found." }
-          "RUSTDESK_EXE=$rustdeskExe" >> $env:GITHUB_ENV
-
-          Write-Host "Installing RustDesk Service..."
-          Start-Process -FilePath $rustdeskExe -ArgumentList '--install-service' -Wait -NoNewWindow
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cloudflaredExe -UseBasicParsing
           
-          Write-Host "Starting RustDesk Service..."
-          Start-Service -Name RustDesk -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 5
+          Write-Host "Starting Cloudflare Quick Tunnel for RDP (Port 3389)..."
+          # Chạy cloudflared ở chế độ tcp tunnel và ghi log ra file để lấy địa chỉ
+          $logFile = "$env:TEMP\cloudflared.log"
+          Start-Process -FilePath $cloudflaredExe -ArgumentList "tunnel --url rdp://127.0.0.1:3389" -RedirectStandardError $logFile -WindowStyle Hidden
           
-          Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
-
-      - name: Configure RustDesk Password
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Write-Host "Setting RustDesk Password..."
-          # Bọc pass trong ngoặc kép
-          Start-Process -FilePath $env:RUSTDESK_EXE -ArgumentList "--password `"$env:GENERATED_PASSWORD`"" -Wait -NoNewWindow
-          Start-Sleep -Seconds 3
-
-      - name: Get RustDesk ID
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "Getting RustDesk ID..."
+          # Chờ vài giây để cloudflared khởi tạo và kết nối mạng công cộng
+          $maxRetries = 15
+          $tunnelUrl = $null
           
-          $rustdeskId = $null
-          for ($i = 1; $i -le 10 -and -not $rustdeskId; $i++) {
-            $idOutput = @(& $env:RUSTDESK_EXE --get-id 2>&1)
-            foreach ($line in $idOutput) {
-              if (([string]$line).Trim() -match '^\d{6,20}$') { $rustdeskId = $matches[0]; break }
-            }
-            if (-not $rustdeskId) { Start-Sleep -Seconds 3 }
+          for ($i = 1; $i -le $maxRetries; $i++) {
+              Start-Sleep -Seconds 3
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile -Raw
+                  # Quét tìm địa chỉ dạng tcp://...trycloudflare.com:XXXXX hoặc tương tự
+                  if ($content -match '(tcp://[^\s]+)') {
+                      $tunnelUrl = $Matches[1]
+                      break
+                  }
+              }
+              Write-Host "Waiting for Cloudflare Tunnel URL... ($i/$maxRetries)"
           }
           
-          if (-not $rustdeskId) { 
-              throw "Failed to get RustDesk ID."
+          if (-not $tunnelUrl) {
+              # Fallback sang cách đọc file log chi tiết nếu không khớp regex trên
+              $content = Get-Content $logFile -ErrorAction SilentlyContinue
+              Write-Host "Cloudflare Log Output:"
+              $content | ForEach-Object { Write-Host $_ }
+              throw "Could not retrieve Cloudflare Tunnel URL."
           }
           
-          Write-Host "RustDesk ID obtained: $rustdeskId"
-          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
+          Write-Host "✅ Cloudflare Tunnel URL: $tunnelUrl"
+          "RDP_TUNNEL_URL=$tunnelUrl" >> $env:GITHUB_ENV
 
       - name: Publish Connection Information
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
           $summary = @(
-            '## GPU Cloud PC (RustDesk)',
-            "- RustDesk ID: $env:RUSTDESK_ID",
-            "- Password: $env:GENERATED_PASSWORD",
+            '## GPU Cloud PC (Cloudflare RDP)',
+            "- **Tunnel Address:** `$env:RDP_TUNNEL_URL",
+            "- **Username:** `GPUUser`",
+            "- **Password:** `$env:GENERATED_PASSWORD`",
             "",
             "**Hướng dẫn kết nối:**",
-            "1. Mở app RustDesk trên thiết bị của bạn.",
-            "2. Nhập ID: $env:RUSTDESK_ID",
-            "3. Nhập Password ở trên để kết nối."
+            "1. Nhấn tổ hợp phím `Windows + R`, gõ `mstsc` rồi nhấn Enter.",
+            "2. Nhập địa chỉ tunnel vào ô Computer.",
+            "3. Nhấn Connect, điền tài khoản `GPUUser` và mật khẩu ở trên."
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
@@ -186,14 +155,9 @@ jobs:
           Write-Host "Session ends at: $end"
           
           while ((Get-Date) -lt $end) {
-            $svc = Get-Service -Name RustDesk -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -ne 'Running') {
-              Start-Service -Name RustDesk -ErrorAction SilentlyContinue
-            }
-            
-            $remain = $end - (Get-Date)
-            Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
-            Start-Sleep -Seconds 60
+              $remain = $end - (Get-Date)
+              Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
+              Start-Sleep -Seconds 60
           }
 
       - name: Cleanup
