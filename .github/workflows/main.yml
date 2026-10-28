@@ -33,10 +33,12 @@ jobs:
 
       - name: Setup Windows Account & Enable RDP
         shell: powershell
+        timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
+          Write-Host "Disabling password complexity policy..."
           
-          # Tắt chính sách yêu cầu mật khẩu phức tạp của Windows Server
+          # 1. Tắt chính sách yêu cầu mật khẩu phức tạp của Windows Server
           $seceditFile = "$env:TEMP\secpol.inf"
           $seceditContent = @(
               "[Unicode]", "Unicode=yes", "[System Access]",
@@ -46,7 +48,8 @@ jobs:
           $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
           Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
 
-          # Tạo tài khoản Windows (GPUUser)
+          Write-Host "Creating Windows Account (GPUUser)..."
+          # 2. Tạo tài khoản Windows (GPUUser)
           $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
           $user = Get-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
           if ($null -eq $user) {
@@ -54,15 +57,22 @@ jobs:
           } else {
               Set-LocalUser -Name "GPUUser" -Password $secure
           }
-          Add-LocalGroupMember -Group 'Administrators' -Member "GPUUser"
-          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member "GPUUser"
-
-          # Bật tính năng Remote Desktop (RDP)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
           
-          Write-Host "✅ RDP Enabled and Account Configured."
+          # Phân quyền (Thêm ErrorAction SilentlyContinue để không bị lỗi nếu user đã ở trong group)
+          Add-LocalGroupMember -Group 'Administrators' -Member "GPUUser" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member "GPUUser" -ErrorAction SilentlyContinue
+
+          Write-Host "Enabling Remote Desktop (RDP)..."
+          # 3. Bật tính năng Remote Desktop (RDP)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -ErrorAction SilentlyContinue
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          
+          # 4. Khởi động lại Service RDP để đảm bảo cổng 3389 mở
+          Set-Service -Name TermService -StartupType Automatic -ErrorAction SilentlyContinue
+          Start-Service -Name TermService -ErrorAction SilentlyContinue
+          
+          Write-Host "✅ RDP Enabled and Account Configured successfully."
 
       - name: Install Mesa3D (Software GPU)
         shell: powershell
