@@ -38,7 +38,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Write-Host "Disabling password complexity policy..."
           
-          # 1. Tắt chính sách yêu cầu mật khẩu phức tạp của Windows Server
+          # 1. Tắt chính sách yêu cầu mật khẩu phức tạp
           $seceditFile = "$env:TEMP\secpol.inf"
           $seceditContent = @(
               "[Unicode]", "Unicode=yes", "[System Access]",
@@ -49,7 +49,7 @@ jobs:
           Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
 
           Write-Host "Creating Windows Account (GPUUser)..."
-          # 2. Tạo tài khoản Windows (GPUUser)
+          # 2. Tạo tài khoản Windows
           $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
           $user = Get-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
           if ($null -eq $user) {
@@ -58,21 +58,21 @@ jobs:
               Set-LocalUser -Name "GPUUser" -Password $secure
           }
           
-          # Phân quyền (Thêm ErrorAction SilentlyContinue để không bị lỗi nếu user đã ở trong group)
+          # Phân quyền (Dùng SilentlyContinue để tránh lỗi nếu đã có trong group)
           Add-LocalGroupMember -Group 'Administrators' -Member "GPUUser" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group 'Remote Desktop Users' -Member "GPUUser" -ErrorAction SilentlyContinue
 
           Write-Host "Enabling Remote Desktop (RDP)..."
-          # 3. Bật tính năng Remote Desktop (RDP)
+          # 3. Bật RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -ErrorAction SilentlyContinue
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -ErrorAction SilentlyContinue
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           
-          # 4. Khởi động lại Service RDP để đảm bảo cổng 3389 mở
+          # 4. Khởi động lại Service RDP để chắc chắn cổng 3389 mở
           Set-Service -Name TermService -StartupType Automatic -ErrorAction SilentlyContinue
           Start-Service -Name TermService -ErrorAction SilentlyContinue
           
-          Write-Host "✅ RDP Enabled and Account Configured successfully."
+          Write-Host "✅ RDP Enabled and Account Configured."
 
       - name: Install Mesa3D (Software GPU)
         shell: powershell
@@ -95,6 +95,7 @@ jobs:
           $process = Start-Process -FilePath $sevenZip -ArgumentList "x `"$archive`" `"-o$mesaDir`" -y" -Wait -PassThru -NoNewWindow
           if ($process.ExitCode -ne 0) { throw "Failed to extract Mesa3D." }
           
+          # Thiết lập biến môi trường
           [System.Environment]::SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe", "Machine")
           [System.Environment]::SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1", "Machine")
           [System.Environment]::SetEnvironmentVariable("MESA_GL_VERSION_OVERRIDE", "4.6", "Machine")
@@ -103,6 +104,7 @@ jobs:
 
       - name: Setup Ngrok & Expose RDP Port (3389)
         shell: powershell
+        timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
           Write-Host "Downloading Ngrok..."
@@ -111,26 +113,33 @@ jobs:
           Expand-Archive -Path $ngrokZip -DestinationPath "C:\Ngrok" -Force
           
           $ngrokExe = "C:\Ngrok\ngrok.exe"
-          # Lấy token trực tiếp từ GitHub Secrets đã lưu
+          Write-Host "Configuring Ngrok Authtoken..."
           & $ngrokExe config add-authtoken "${{ secrets.NGROK_AUTHTOKEN }}"
           
-          # Chạy ngrok ngầm forward cổng TCP 3389
+          Write-Host "Starting Ngrok Tunnel for RDP..."
           Start-Process -FilePath $ngrokExe -ArgumentList "tcp 3389" -WindowStyle Hidden
-          Start-Sleep -Seconds 5
-
-          # Lấy địa chỉ Host và Port từ API của ngrok
-          try {
-              $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 10
-              $tunnel = $response.tunnels | Where-Object { $_.proto -eq 'tcp' } | Select-Object -First 1
-              if ($tunnel) {
-                  $publicUrl = $tunnel.public_url -replace "tcp://", ""
-                  "RDP_HOST_PORT=$publicUrl" >> $env:GITHUB_ENV
-                  Write-Host "✅ Ngrok Tunnel Established: $publicUrl"
-              } else {
-                  throw "Could not find active TCP tunnel in Ngrok API response."
+          
+          Write-Host "Waiting for Ngrok API to respond..."
+          # Vòng lặp kiên nhẫn chờ API Ngrok khởi động (tối đa 30 giây)
+          $maxRetries = 15
+          $tunnel = $null
+          for ($i = 1; $i -le $maxRetries; $i++) {
+              Start-Sleep -Seconds 2
+              try {
+                  $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 5 -ErrorAction Stop
+                  $tunnel = $response.tunnels | Where-Object { $_.proto -eq 'tcp' } | Select-Object -First 1
+                  if ($tunnel) { break }
+              } catch {
+                  Write-Host "Waiting for Ngrok API... ($i/$maxRetries)"
               }
-          } catch {
-              throw "Failed to retrieve Ngrok address: $_"
+          }
+
+          if ($tunnel) {
+              $publicUrl = $tunnel.public_url -replace "tcp://", ""
+              "RDP_HOST_PORT=$publicUrl" >> $env:GITHUB_ENV
+              Write-Host "✅ Ngrok Tunnel Established: $publicUrl"
+          } else {
+              throw "Failed to retrieve Ngrok address. Please check if NGROK_AUTHTOKEN is valid."
           }
 
       - name: Publish Connection Information
