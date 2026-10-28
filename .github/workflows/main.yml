@@ -118,20 +118,29 @@ jobs:
           & $ngrokExe config add-authtoken "${{ secrets.NGROK_AUTHTOKEN }}"
           
           Write-Host "Starting Ngrok Tunnel for RDP..."
-          Start-Process -FilePath $ngrokExe -ArgumentList "tcp 3389" -WindowStyle Hidden
+          $ngrokLog = "$env:TEMP\ngrok.log"
+          
+          # Chạy Ngrok và ghi log ra file thay vì ẩn đi
+          $proc = Start-Process -FilePath $ngrokExe -ArgumentList "tcp 3389 --log=`"$ngrokLog`" --log-format=json" -WindowStyle Hidden -PassThru
           
           Write-Host "Waiting for Ngrok API to respond..."
-          # Vòng lặp kiên nhẫn chờ API Ngrok khởi động (tối đa 30 giây)
-          $maxRetries = 15
           $tunnel = $null
-          for ($i = 1; $i -le $maxRetries; $i++) {
-              Start-Sleep -Seconds 2
+          for ($i = 1; $i -le 10; $i++) {
+              Start-Sleep -Seconds 3
+              
+              # Kiểm tra xem Ngrok có bị chết ngay không
+              if ($proc.HasExited) {
+                  Write-Host "❌ Ngrok crashed unexpectedly! Here is the log:"
+                  if (Test-Path $ngrokLog) { Get-Content $ngrokLog }
+                  throw "Ngrok process exited with code $($proc.ExitCode)."
+              }
+
               try {
-                  $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 5 -ErrorAction Stop
+                  $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 3 -ErrorAction Stop
                   $tunnel = $response.tunnels | Where-Object { $_.proto -eq 'tcp' } | Select-Object -First 1
                   if ($tunnel) { break }
               } catch {
-                  Write-Host "Waiting for Ngrok API... ($i/$maxRetries)"
+                  Write-Host "Waiting for Ngrok API... ($i/10)"
               }
           }
 
@@ -140,7 +149,9 @@ jobs:
               "RDP_HOST_PORT=$publicUrl" >> $env:GITHUB_ENV
               Write-Host "✅ Ngrok Tunnel Established: $publicUrl"
           } else {
-              throw "Failed to retrieve Ngrok address. Please check if NGROK_AUTHTOKEN is valid."
+              Write-Host "❌ Failed to retrieve Ngrok address. Check the log below:"
+              if (Test-Path $ngrokLog) { Get-Content $ngrokLog }
+              throw "Could not retrieve Ngrok address. Please check if NGROK_AUTHTOKEN requires a verified credit card for TCP."
           }
 
       - name: Publish Connection Information
