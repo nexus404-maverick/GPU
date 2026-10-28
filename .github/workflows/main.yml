@@ -1,4 +1,4 @@
-name: GPU Cloud PC (RDP + Ngrok Secrets)
+name: GPU Cloud PC (RDP + Cloudflare)
 
 on:
   workflow_dispatch:
@@ -29,25 +29,19 @@ jobs:
           $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
           $password = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
           "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
-          Write-Host "✅ Generated password for RDP user."
+          Write-Host "✅ Generated password."
 
       - name: Setup Windows Account & Enable RDP
         shell: powershell
         timeout-minutes: 5
         run: |
           try {
-              Write-Host "Disabling password complexity policy..."
               $seceditFile = "$env:TEMP\secpol.inf"
-              $seceditContent = @(
-                  "[Unicode]", "Unicode=yes", "[System Access]",
-                  "PasswordComplexity = 0", "MinimumPasswordLength = 0"
-              )
+              $seceditContent = @("[Unicode]", "Unicode=yes", "[System Access]", "PasswordComplexity = 0", "MinimumPasswordLength = 0")
               Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
-              # Dùng Out-Null để không in log rác ra màn hình
               $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
               Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
 
-              Write-Host "Creating Windows Account (GPUUser)..."
               $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
               $user = Get-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
               if ($null -eq $user) {
@@ -56,11 +50,9 @@ jobs:
                   $null = Set-LocalUser -Name "GPUUser" -Password $secure
               }
               
-              # Thêm vào group (dùng out-null để không văng lỗi nếu đã có)
               $null = Add-LocalGroupMember -Group 'Administrators' -Member "GPUUser" -ErrorAction SilentlyContinue
               $null = Add-LocalGroupMember -Group 'Remote Desktop Users' -Member "GPUUser" -ErrorAction SilentlyContinue
 
-              Write-Host "Enabling Remote Desktop (RDP)..."
               $null = Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -ErrorAction SilentlyContinue
               $null = Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -ErrorAction SilentlyContinue
               $null = Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
@@ -70,9 +62,8 @@ jobs:
               
               Write-Host "✅ RDP Enabled and Account Configured."
           } catch {
-              Write-Host "⚠️ Cảnh báo: $_"
+              Write-Host "⚠️ Warning: $_"
           }
-          # Ép buộc thoát với mã 0 (thành công) để GitHub không báo đỏ
           exit 0
 
       - name: Install Mesa3D (Software GPU)
@@ -80,7 +71,6 @@ jobs:
         timeout-minutes: 10
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "Downloading Mesa3D..."
           $mesaDir = "C:\Mesa3D"
           $archive = "$env:TEMP\mesa.7z"
           New-Item -ItemType Directory -Path $mesaDir -Force | Out-Null
@@ -92,82 +82,60 @@ jobs:
               Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $sevenZip -UseBasicParsing
           }
           
-          Write-Host "Extracting Mesa3D..."
           $process = Start-Process -FilePath $sevenZip -ArgumentList "x `"$archive`" `"-o$mesaDir`" -y" -Wait -PassThru -NoNewWindow
           if ($process.ExitCode -ne 0) { throw "Failed to extract Mesa3D." }
           
-          # Thiết lập biến môi trường
           [System.Environment]::SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe", "Machine")
           [System.Environment]::SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1", "Machine")
           [System.Environment]::SetEnvironmentVariable("MESA_GL_VERSION_OVERRIDE", "4.6", "Machine")
           [System.Environment]::SetEnvironmentVariable("MESA_GLSL_VERSION_OVERRIDE", "460", "Machine")
           Write-Host "✅ Mesa3D installed."
 
-      - name: Setup Ngrok & Expose RDP Port (3389)
+      - name: Setup Cloudflare Tunnel
         shell: powershell
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "Downloading Ngrok..."
-          $ngrokZip = "$env:TEMP\ngrok.zip"
-          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile $ngrokZip -UseBasicParsing
-          Expand-Archive -Path $ngrokZip -DestinationPath "C:\Ngrok" -Force
+          Write-Host "Downloading Cloudflared..."
+          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          Invoke-WebRequest -Uri $cfUrl -OutFile "$env:TEMP\cloudflared.exe" -UseBasicParsing
           
-          $ngrokExe = "C:\Ngrok\ngrok.exe"
-          Write-Host "Configuring Ngrok Authtoken..."
-          & $ngrokExe config add-authtoken "${{ secrets.NGROK_AUTHTOKEN }}"
+          Write-Host "Starting Cloudflare Tunnel for RDP..."
+          $cfLog = "$env:TEMP\cf.log"
+          Start-Process -FilePath "$env:TEMP\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput $cfLog
           
-          Write-Host "Starting Ngrok Tunnel for RDP..."
-          $ngrokLog = "$env:TEMP\ngrok.log"
+          Write-Host "Waiting for Tunnel to initialize..."
+          Start-Sleep -Seconds 15
           
-          # Chạy Ngrok và ghi log ra file thay vì ẩn đi
-          $proc = Start-Process -FilePath $ngrokExe -ArgumentList "tcp 3389 --log=`"$ngrokLog`" --log-format=json" -WindowStyle Hidden -PassThru
-          
-          Write-Host "Waiting for Ngrok API to respond..."
-          $tunnel = $null
-          for ($i = 1; $i -le 10; $i++) {
-              Start-Sleep -Seconds 3
-              
-              # Kiểm tra xem Ngrok có bị chết ngay không
-              if ($proc.HasExited) {
-                  Write-Host "❌ Ngrok crashed unexpectedly! Here is the log:"
-                  if (Test-Path $ngrokLog) { Get-Content $ngrokLog }
-                  throw "Ngrok process exited with code $($proc.ExitCode)."
-              }
-
-              try {
-                  $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 3 -ErrorAction Stop
-                  $tunnel = $response.tunnels | Where-Object { $_.proto -eq 'tcp' } | Select-Object -First 1
-                  if ($tunnel) { break }
-              } catch {
-                  Write-Host "Waiting for Ngrok API... ($i/10)"
+          $publicAddress = $null
+          if (Test-Path $cfLog) {
+              # Đọc file log để lấy địa chỉ trycloudflare
+              $logContent = Get-Content $cfLog -Raw
+              if ($logContent -match 'https://([a-zA-Z0-9\-]+\.trycloudflare\.com)') {
+                  $publicAddress = $matches[0]
               }
           }
-
-          if ($tunnel) {
-              $publicUrl = $tunnel.public_url -replace "tcp://", ""
-              "RDP_HOST_PORT=$publicUrl" >> $env:GITHUB_ENV
-              Write-Host "✅ Ngrok Tunnel Established: $publicUrl"
-          } else {
-              Write-Host "❌ Failed to retrieve Ngrok address. Check the log below:"
-              if (Test-Path $ngrokLog) { Get-Content $ngrokLog }
-              throw "Could not retrieve Ngrok address. Please check if NGROK_AUTHTOKEN requires a verified credit card for TCP."
-          }
+          
+          if (-not $publicAddress) { throw "Failed to get Cloudflare public address." }
+          
+          Write-Host "✅ RDP Address obtained: $publicAddress"
+          "CF_ADDRESS=$publicAddress" >> $env:GITHUB_ENV
 
       - name: Publish Connection Information
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
           $summary = @(
-            '## GPU Cloud PC (Microsoft RDP + Ngrok)',
-            "- **Address (IP:Port):** `$env:RDP_HOST_PORT",
+            '## GPU Cloud PC (RDP + Cloudflare)',
+            "- **Address (Host):** `$env:CF_ADDRESS",
+            "- **Port:** `443",
             "- **Username:** `GPUUser`",
             "- **Password:** `$env:GENERATED_PASSWORD`",
             "",
             "**Hướng dẫn kết nối:**",
-            "1. Nhấn tổ hợp phím `Windows + R`, gõ `mstsc` rồi nhấn Enter.",
-            "2. Nhập địa chỉ: **`$env:RDP_HOST_PORT`** vào ô Computer.",
-            "3. Nhấn Connect, điền tài khoản `GPUUser` và mật khẩu ở trên."
+            "1. Mở Remote Desktop Connection (mstsc) hoặc aRDP.",
+            "2. Nhập Address: `$env:CF_ADDRESS` và Port: `443`.",
+            "3. Nhập User và Pass ở trên."
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
@@ -184,9 +152,19 @@ jobs:
           Write-Host "Session ends at: $end"
           
           while ((Get-Date) -lt $end) {
-              $remain = $end - (Get-Date)
-              Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
-              Start-Sleep -Seconds 60
+            $svc = Get-Service -Name TermService -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Running') {
+              Start-Service -Name TermService -ErrorAction SilentlyContinue
+            }
+            # Đảm bảo cloudflared không bị tắt
+            $cfProc = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+            if (-not $cfProc) {
+                Start-Process -FilePath "$env:TEMP\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP\cf.log"
+            }
+            
+            $remain = $end - (Get-Date)
+            Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
+            Start-Sleep -Seconds 60
           }
 
       - name: Cleanup
