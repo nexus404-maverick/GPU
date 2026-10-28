@@ -1,13 +1,8 @@
-name: GPU Cloud PC (RDP + Mesa3D)
+name: Windows Cloud PC (AnyDesk + Mesa3D)
 
 on:
   workflow_dispatch:
     inputs:
-      instance_number:
-        description: 'Mã đơn hàng / Tên phiên'
-        required: true
-        default: 'GPU-Session-01'
-        type: string
       hours:
         description: 'Số giờ thuê (1-5)'
         required: true
@@ -35,11 +30,10 @@ jobs:
           $password = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
           "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
 
-      - name: Setup Windows RDP & User
+      - name: Setup Windows Account
         shell: powershell
         run: |
           try {
-              Write-Host "Disabling password policy..."
               $seceditFile = "$env:TEMP\secpol.inf"
               $seceditContent = @(
                   "[Unicode]", "Unicode=yes", "[System Access]",
@@ -49,12 +43,6 @@ jobs:
               $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
               Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
               
-              Write-Host "Enabling RDP..."
-              Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction SilentlyContinue
-              Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -ErrorAction SilentlyContinue
-              Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
-
-              Write-Host "Creating User..."
               $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
               $user = Get-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
               if ($null -eq $user) {
@@ -62,14 +50,8 @@ jobs:
               } else {
                 Set-LocalUser -Name "GPUUser" -Password $secure -ErrorAction SilentlyContinue
               }
-              Add-LocalGroupMember -Group 'Remote Desktop Users' -Member "GPUUser" -ErrorAction SilentlyContinue
               Add-LocalGroupMember -Group 'Administrators' -Member "GPUUser" -ErrorAction SilentlyContinue
-              
-              Set-Service -Name TermService -StartupType Automatic -ErrorAction SilentlyContinue
-              Start-Service -Name TermService -ErrorAction SilentlyContinue
-          } catch {
-              Write-Host "Warning: $_"
-          }
+          } catch { Write-Host "Warning: $_" }
           exit 0
 
       - name: Install Mesa3D (Software GPU)
@@ -78,7 +60,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Write-Host "Downloading Mesa3D..."
-          
           $mesaDir = "C:\Mesa3D"
           $archive = "$env:TEMP\mesa.7z"
           New-Item -ItemType Directory -Path $mesaDir -Force | Out-Null
@@ -92,66 +73,75 @@ jobs:
           
           Write-Host "Extracting Mesa3D..."
           $process = Start-Process -FilePath $sevenZip -ArgumentList "x `"$archive`" `"-o$mesaDir`" -y" -Wait -PassThru -NoNewWindow
-          
           if ($process.ExitCode -ne 0) { throw "Failed to extract Mesa3D." }
           
           [System.Environment]::SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe", "Machine")
           [System.Environment]::SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1", "Machine")
           [System.Environment]::SetEnvironmentVariable("MESA_GL_VERSION_OVERRIDE", "4.6", "Machine")
           [System.Environment]::SetEnvironmentVariable("MESA_GLSL_VERSION_OVERRIDE", "460", "Machine")
-          
-          Write-Host "Mesa3D đã được cài đặt tại $mesaDir"
+          Write-Host "✅ Mesa3D installed."
 
-      - name: Setup Cloudflare Tunnel
+      - name: Install AnyDesk
         shell: powershell
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "Downloading Cloudflared..."
-          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          Invoke-WebRequest -Uri $cfUrl -OutFile "$env:TEMP\cloudflared.exe" -UseBasicParsing
+          Write-Host "Downloading AnyDesk..."
+          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "$env:TEMP\AnyDesk.exe" -UseBasicParsing
           
-          Write-Host "Starting Cloudflare Tunnel..."
-          $cfLog = "$env:TEMP\cf.log"
-          Start-Process -FilePath "$env:TEMP\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput $cfLog
+          Write-Host "Installing AnyDesk silently..."
+          Start-Process -FilePath "$env:TEMP\AnyDesk.exe" -ArgumentList "--install `"C:\Program Files\AnyDesk`" --silent" -Wait -NoNewWindow
           
-          Write-Host "Waiting for Tunnel to initialize..."
-          Start-Sleep -Seconds 15
+          $anydeskExe = "C:\Program Files\AnyDesk\AnyDesk.exe"
+          if (-not (Test-Path $anydeskExe)) { throw "AnyDesk.exe not found." }
+
+          Write-Host "Setting AnyDesk Password..."
+          Start-Process -FilePath $anydeskExe -ArgumentList "--set-password `"$env:GENERATED_PASSWORD`"" -Wait -NoNewWindow
+          Start-Sleep -Seconds 5
+
+      - name: Start AnyDesk and Get ID
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $anydeskExe = "C:\Program Files\AnyDesk\AnyDesk.exe"
           
-          $publicAddress = $null
-          if (Test-Path $cfLog) {
-              $logContent = Get-Content $cfLog -Raw
-              if ($logContent -match 'https://([a-zA-Z0-9\-]+\.trycloudflare\.com)') {
-                  $publicAddress = $matches[0]
-              }
+          Write-Host "Starting AnyDesk..."
+          Start-Process -FilePath $anydeskExe -ArgumentList "--service" -WindowStyle Hidden
+          Start-Sleep -Seconds 10
+
+          Write-Host "Getting AnyDesk ID..."
+          $anydeskId = $null
+          for ($i = 1; $i -le 10 -and -not $anydeskId; $i++) {
+            $idOutput = @(& $anydeskExe --get-id 2>&1)
+            foreach ($line in $idOutput) {
+              if (([string]$line).Trim() -match '^\d{9,10}$') { $anydeskId = $matches[0]; break }
+            }
+            if (-not $anydeskId) { Start-Sleep -Seconds 3 }
           }
           
-          if (-not $publicAddress) { throw "Failed to get Cloudflare public address. Check logs." }
+          if (-not $anydeskId) { throw "Failed to get AnyDesk ID." }
           
-          Write-Host "RDP Address obtained: $publicAddress"
-          "CF_ADDRESS=$publicAddress" >> $env:GITHUB_ENV
+          Write-Host "AnyDesk ID obtained: $anydeskId"
+          "ANYDESK_ID=$anydeskId" >> $env:GITHUB_ENV
 
-      - name: Publish RDP Information
+      - name: Publish Connection Information
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
-          $nodeId = [string]'${{ github.event.inputs.instance_number }}'
-          
           $summary = @(
-            '## GPU Cloud PC (RDP + Mesa3D)',
-            "- Session: $nodeId",
-            "- Address (Host): $env:CF_ADDRESS",
-            "- Username: GPUUser",
+            '## GPU Cloud PC (AnyDesk)',
+            "- AnyDesk ID: $env:ANYDESK_ID",
             "- Password: $env:GENERATED_PASSWORD",
             "",
             "**Hướng dẫn kết nối:**",
-            "1. Mở Remote Desktop Connection (mstsc) hoặc aRDP.",
-            "2. Nhập Address: $env:CF_ADDRESS (cổng 443)",
-            "3. Nhập User và Pass ở trên."
+            "1. Mở app AnyDesk trên thiết bị của bạn.",
+            "2. Nhập ID: $env:ANYDESK_ID",
+            "3. Nhập Password ở trên để kết nối."
           )
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
-      - name: Keep session alive
+      - name: Keep session alive & monitor AnyDesk
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
@@ -164,13 +154,10 @@ jobs:
           Write-Host "Session ends at: $end"
           
           while ((Get-Date) -lt $end) {
-            $svc = Get-Service -Name TermService -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -ne 'Running') {
-              Start-Service -Name TermService -ErrorAction SilentlyContinue
-            }
-            $cfProc = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
-            if (-not $cfProc) {
-                Start-Process -FilePath "$env:TEMP\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP\cf.log"
+            $anydesk = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+            if (-not $anydesk) {
+                Write-Host "AnyDesk died, restarting..."
+                Start-Process -FilePath "C:\Program Files\AnyDesk\AnyDesk.exe" -ArgumentList "--service" -WindowStyle Hidden
             }
             
             $remain = $end - (Get-Date)
