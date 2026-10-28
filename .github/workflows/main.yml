@@ -99,41 +99,86 @@ jobs:
           "MESA3D_DLL=$($dll.FullName)" >> $env:GITHUB_ENV
           Write-Host "Mesa3D downloaded and validated. DLL: $($dll.FullName)"
 
+      
       - name: Start Pinggy Tunnel
         shell: powershell
         timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
+
+          $ssh = Get-Command ssh.exe -ErrorAction SilentlyContinue
+          if (-not $ssh) {
+            throw 'OpenSSH ssh.exe is not installed.'
+          }
+
           $sshLog = Join-Path $env:TEMP 'pinggy.log'
           $sshErr = Join-Path $env:TEMP 'pinggy-error.log'
           Remove-Item $sshLog,$sshErr -Force -ErrorAction SilentlyContinue
-          $ssh = Get-Command ssh.exe -ErrorAction SilentlyContinue
-          if (-not $ssh) { throw 'OpenSSH client ssh.exe is not installed.' }
 
-          $arguments = '-T -p 443 -R 0:localhost:3389 -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 a.pinggy.io'
-          Start-Process -FilePath $ssh.Source -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $sshLog -RedirectStandardError $sshErr | Out-Null
+          Write-Host 'Starting Pinggy TCP tunnel to RDP port 3389...'
+
+          # Use Pinggy's documented TCP endpoint and IPv4 loopback on Windows.
+          $arguments = @(
+            '-T',
+            '-p', '443',
+            '-R', '0:127.0.0.1:3389',
+            '-o', 'StrictHostKeyChecking=accept-new',
+            '-o', 'ServerAliveInterval=30',
+            '-o', 'ServerAliveCountMax=3',
+            'tcp@free.pinggy.io'
+          )
+
+          $process = Start-Process `
+            -FilePath $ssh.Source `
+            -ArgumentList $arguments `
+            -PassThru `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $sshLog `
+            -RedirectStandardError $sshErr
 
           $publicHost = $null
           $publicPort = $null
-          for ($i = 0; $i -lt 30 -and -not $publicHost; $i++) {
+          $logContent = ''
+
+          # Allow up to 90 seconds for the tunnel to report its endpoint.
+          for ($i = 0; $i -lt 45; $i++) {
             Start-Sleep -Seconds 2
+
             $logContent = ''
-            if (Test-Path $sshLog) { $logContent += Get-Content $sshLog -Raw -ErrorAction SilentlyContinue }
-            if (Test-Path $sshErr) { $logContent += "`n" + (Get-Content $sshErr -Raw -ErrorAction SilentlyContinue) }
-            if ($logContent -match 'tcp://([a-zA-Z0-9.-]+):(\d{2,5})') {
+            if (Test-Path $sshLog) {
+              $logContent += (Get-Content $sshLog -Raw -ErrorAction SilentlyContinue)
+            }
+            if (Test-Path $sshErr) {
+              $logContent += "`n" + (Get-Content $sshErr -Raw -ErrorAction SilentlyContinue)
+            }
+
+            if ($logContent -match '(?i)tcp://([a-z0-9.-]+):(\d{2,5})') {
               $publicHost = $matches[1]
               $publicPort = $matches[2]
+              break
+            }
+
+            if ($process.HasExited) {
+              Write-Host "SSH process exited with code $($process.ExitCode)."
+              break
             }
           }
+
           if (-not $publicHost -or -not $publicPort) {
-            Write-Host 'Pinggy did not provide a TCP endpoint. Diagnostic output:'
-            if (Test-Path $sshLog) { Get-Content $sshLog }
-            if (Test-Path $sshErr) { Get-Content $sshErr }
-            throw 'Could not discover Pinggy TCP endpoint.'
+            Write-Host 'Could not find the TCP endpoint. Pinggy/SSH output follows:'
+            if ($logContent) {
+              Write-Host $logContent
+            } else {
+              Write-Host 'No output received from SSH.'
+            }
+            throw 'Pinggy tunnel failed. Review the diagnostic output above.'
           }
+
           "RDP_HOST=$publicHost" >> $env:GITHUB_ENV
           "RDP_PORT=$publicPort" >> $env:GITHUB_ENV
-          Write-Host "Pinggy endpoint detected: ${publicHost}:$publicPort"
+
+          Write-Host "Pinggy TCP endpoint: ${publicHost}:$publicPort"
+
 
       - name: Publish Connection Details
         shell: powershell
