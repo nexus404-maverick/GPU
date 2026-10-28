@@ -1,211 +1,160 @@
-name: RdpFree — RDP + Mesa3D GPU Ảo
-run-name: Phiên RDP — ${{ inputs.runner }}
+name: GPU Cloud PC (RDP)
 
 on:
   workflow_dispatch:
     inputs:
-      durasi_menit:
-        description: 'Thời gian phiên (phút, 10–360)'
-        required: false
-        default: '360'
+      instance_number:
+        description: 'Mã đơn hàng / Tên phiên'
+        required: true
+        default: 'GPU-Session-01'
         type: string
-      hostname:
-        description: 'Tên máy'
-        required: false
-        default: 'rdpfree'
+      hours:
+        description: 'Số giờ thuê (1-5)'
+        required: true
+        default: '3'
         type: string
-      rdp_user:
-        description: 'Tên tài khoản RDP (3–20 ký tự)'
-        required: false
-        default: 'xyadmin'
-        type: string
-      rdp_port:
-        description: 'Cổng RDP (mặc định 3389)'
-        required: false
-        default: '3389'
-        type: string
-      runner:
-        description: 'Hệ điều hành'
-        required: false
-        default: 'windows-2022'
-        type: choice
-        options:
-          - windows-2022
-          - windows-2025
-          - windows-latest
-      perpanjang_otomatis:
-        description: 'Tự động gia hạn phiên'
-        required: false
-        default: 'ya'
-        type: choice
-        options:
-          - ya
-          - tidak
 
 permissions:
-  contents: write
   actions: write
-
-concurrency:
-  group: rdpfree-active
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  rdp:
-    name: SERVER RDP ĐANG KHỞI ĐỘNG...
-    runs-on: ${{ inputs.runner || 'windows-2022' }}
-    timeout-minutes: ${{ inputs.durasi_menit || '360' }}
-    env:
-      DUR: ${{ inputs.durasi_menit || '360' }}
-      HOSTNAME: ${{ inputs.hostname || 'rdpfree' }}
-      RDP_USER: ${{ inputs.rdp_user || 'xyadmin' }}
-      RDP_PORT: ${{ inputs.rdp_port || '3389' }}
-      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  deploy-instance:
+    runs-on: windows-2025
+    timeout-minutes: 360
 
     steps:
-      # ==================================================
-      # Bước 1: Bật RDP + Tạo tài khoản
-      # ==================================================
-      - name: 🔧 Bật Dịch vụ RDP & Tạo tài khoản
-        shell: pwsh
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      - name: Generate Password
+        shell: powershell
         run: |
-          # Bật RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -Force
-          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+          $ErrorActionPreference = 'Stop'
+          $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+          $password = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+          "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
 
-          # Đổi cổng nếu cần
-          $port = [int]$env:RDP_PORT
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'PortNumber' -Value $port -Force
-
-          # Tạo tài khoản
-          $user = $env:RDP_USER
-          $pass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-          New-LocalUser -Name $user -Password $pass -FullName $user -AccountNeverExpires -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group 'Administrators' -Member $user -ErrorAction SilentlyContinue
-
-          Write-Host "✅ RDP đã sẵn sàng | Cổng: $port | Tài khoản: $user"
-
-      # ==================================================
-      # Bước 2: Cài Mesa3D — GPU Ảo cho Game 3D / Minecraft
-      # ==================================================
-      - name: 🎮 Cài Mesa3D GPU Ảo (OpenGL 4.6 / D3D12)
-        shell: pwsh
+      - name: Setup Windows RDP & User
+        shell: powershell
         run: |
-          Write-Host "Đang tải & cài Mesa3D GPU ảo..."
-          $mesaDir = 'C:\Mesa3D'
-          New-Item -ItemType Directory -Path $mesaDir -Force | Out-Null
-
-          # Tải 7-Zip Portable để giải nén
-          Write-Host "→ Tải công cụ giải nén..."
-          Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7z2408-extra.7z' -OutFile "$mesaDir\7z.7z" -UseBasicParsing
-          Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7z2408-x64.msi' -OutFile "$mesaDir\7z.msi" -UseBasicParsing
-          Start-Process msiexec -ArgumentList "/i $mesaDir\7z.msi /qn /norestart" -Wait
-          $7z = 'C:\Program Files\7-Zip\7z.exe'
-
-          # Tải Mesa3D phiên bản mới nhất
-          Write-Host "→ Tải Mesa3D..."
-          Invoke-WebRequest -Uri 'https://github.com/pal1000/mesa-dist-win/releases/download/24.3.0/mesa3d-24.3.0-release-msvc.7z' -OutFile "$mesaDir\mesa3d.7z" -UseBasicParsing
-
-          # Giải nén
-          Write-Host "→ Giải nén..."
-          & $7z x "$mesaDir\mesa3d.7z" -o"$mesaDir\" -y | Out-Null
-
-          # Thiết lập biến môi trường — kích hoạt GPU ảo
-          Write-Host "→ Cấu hình biến môi trường..."
-          [Environment]::SetEnvironmentVariable('OPENGL_DRIVERS_PATH', "$mesaDir\x64", 'Machine')
-          [Environment]::SetEnvironmentVariable('LIBGL_ALWAYS_SOFTWARE', '1', 'Machine')
-          [Environment]::SetEnvironmentVariable('GALLIUM_DRIVERS_DIR', "$mesaDir\x64", 'Machine')
-          [Environment]::SetEnvironmentVariable('MESA_LOADER_DRIVER_OVERRIDE', 'zink', 'Machine')
-
-          Write-Host "✅ Mesa3D đã cài đặt thành công!"
-          Write-Host "   ✔ OpenGL 4.6 | ✔ Hỗ trợ Minecraft & Game 3D"
-
-      # ==================================================
-      # Bước 3: Cài ứng dụng cơ bản
-      # ==================================================
-      - name: 📦 Cài ứng dụng cơ bản (Chrome, 7-Zip)
-        shell: pwsh
-        run: |
-          Write-Host "Đang cài ứng dụng cơ bản..."
-          winget install --id Google.Chrome --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force
-          winget install --id 7zip.7zip --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --force
-          Write-Host "✅ Đã cài xong ứng dụng"
-
-      # ==================================================
-      # Bước 4: Thông tin đăng nhập — Hiển thị ở Log
-      # ==================================================
-      - name: 🟢 THÔNG TIN ĐĂNG NHẬP RDP
-        shell: pwsh
-        run: |
-          $ip = [System.Net.Dns]::GetHostEntry([string]$env:COMPUTERNAME).AddressList | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1 -ExpandProperty IPAddressToString
-          $hostName = $env:COMPUTERNAME
-          $port = $env:RDP_PORT
-          $user = $env:RDP_USER
-          $pass = $env:RDP_PASSWORD
-
-          Write-Host ""
-          Write-Host "============================================================"
-          Write-Host "          ✅ SERVER RDP ĐÃ SẴN SÀNG!"
-          Write-Host "============================================================"
-          Write-Host " 🏠 Tên máy/IP   : $hostName ($ip)"
-          Write-Host " 🌐 Cổng         : $port"
-          Write-Host " 👤 Tài khoản    : $user"
-          Write-Host " 🔑 Mật khẩu     : $pass"
-          Write-Host "============================================================"
-          Write-Host " 🖥️ Mở Remote Desktop Connection → nhập: $hostName`:$port"
-          Write-Host "============================================================"
-          Write-Host " 🎮 GPU Ảo: Mesa3D OpenGL 4.6 ĐÃ KÍCH HOẠT"
-          Write-Host " ✅ Sẵn sàng chạy Minecraft & các tựa game 3D"
-          Write-Host "============================================================"
-          Write-Host ""
-
-      # ==================================================
-      # Bước 5: Giữ phiên hoạt động
-      # ==================================================
-      - name: ⏳ Đang hoạt động — Nhấn 'Cancel' để tắt máy
-        shell: pwsh
-        run: |
-          Write-Host "🔄 Phiên đang hoạt động... Đóng workflow sẽ tắt máy."
-          $durationMinutes = [int]$env:DUR
-          $endTime = (Get-Date).AddMinutes($durationMinutes)
-          while ((Get-Date) -lt $endTime) {
-            Write-Host "💓 Hoạt động — $(Get-Date -Format 'HH:mm:ss') — Còn $([math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)) phút"
-            Start-Sleep -Seconds 60
-          }
-          Write-Host "⏰ Đã hết thời gian phiên!"
-
-      # ==================================================
-      # Bước 6: Tự động gia hạn
-      # ==================================================
-      - name: 🔄 Tự động tạo phiên tiếp theo
-        if: ${{ success() && (inputs.perpanjang_otomatis || 'ya') == 'ya' }}
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          $hdr = @{
-            Authorization          = "Bearer $($env:GITHUB_TOKEN)"
-            Accept                 = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $body = @{
-            ref    = 'main'
-            inputs = @{
-              durasi_menit        = "$($env:DUR)"
-              hostname            = "$($env:HOSTNAME)"
-              rdp_user            = "$($env:RDP_USER)"
-              rdp_port            = "$($env:RDP_PORT)"
-              runner              = "${{ inputs.runner || 'windows-2022' }}"
-              perpanjang_otomatis = 'ya'
-            }
-          } | ConvertTo-Json -Depth 5
           try {
-            Start-Sleep -Seconds (Get-Random -Minimum 15 -Maximum 26)
-            Invoke-RestMethod -Uri "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/actions/workflows/main.yml/dispatches" `
-              -Headers $hdr -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 20 | Out-Null
-            Write-Host '✅ Phiên tiếp theo đã được lên lịch tự động'
+              Write-Host "Disabling password policy..."
+              $seceditFile = "$env:TEMP\secpol.inf"
+              $seceditContent = @(
+                  "[Unicode]", "Unicode=yes", "[System Access]",
+                  "PasswordComplexity = 0", "MinimumPasswordLength = 0"
+              )
+              Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
+              $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
+              Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
+              
+              Write-Host "Enabling RDP..."
+              Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction SilentlyContinue
+              Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -ErrorAction SilentlyContinue
+              Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+
+              Write-Host "Creating User..."
+              $secure = ConvertTo-SecureString "$env:GENERATED_PASSWORD" -AsPlainText -Force
+              $user = Get-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
+              if ($null -eq $user) {
+                New-LocalUser -Name "GPUUser" -Password $secure -PasswordNeverExpires -AccountNeverExpires -FullName 'GPU User' -ErrorAction SilentlyContinue
+              } else {
+                Set-LocalUser -Name "GPUUser" -Password $secure -ErrorAction SilentlyContinue
+              }
+              Add-LocalGroupMember -Group 'Remote Desktop Users' -Member "GPUUser" -ErrorAction SilentlyContinue
+              Add-LocalGroupMember -Group 'Administrators' -Member "GPUUser" -ErrorAction SilentlyContinue
+              
+              Set-Service -Name TermService -StartupType Automatic -ErrorAction SilentlyContinue
+              Start-Service -Name TermService -ErrorAction SilentlyContinue
           } catch {
-            Write-Host "⚠️ Tự động gia hạn bị bỏ qua: $($_.Exception.Message)"
+              Write-Host "Warning: $_"
+          }
+          exit 0
+
+      - name: Setup Cloudflare Tunnel
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "Downloading Cloudflared..."
+          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          Invoke-WebRequest -Uri $cfUrl -OutFile "$env:TEMP\cloudflared.exe" -UseBasicParsing
+          
+          Write-Host "Starting Cloudflare Tunnel (RDP port 3389)..."
+          # Chạy cloudflared tunnel trỏ vào cổng RDP 3389
+          $cfLog = "$env:TEMP\cf.log"
+          Start-Process -FilePath "$env:TEMP\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput $cfLog
+          
+          # Đợi Cloudflared khởi tạo và sinh link
+          Start-Sleep -Seconds 15
+          
+          # Đọc file log để trích xuất địa chỉ host:port
+          $publicAddress = $null
+          if (Test-Path $cfLog) {
+              $logContent = Get-Content $cfLog -Raw
+              # Tìm dòng có dạng: https://random-name.trycloudflare.com hoặc tcp://...
+              if ($logContent -match 'https?://([a-zA-Z0-9\-]+\.trycloudflare\.com)') {
+                  $publicAddress = $matches[0]
+              }
           }
           
+          if (-not $publicAddress) { throw "Failed to get Cloudflare public address. Check logs." }
+          
+          Write-Host "RDP Address obtained: $publicAddress"
+          "CF_ADDRESS=$publicAddress" >> $env:GITHUB_ENV
+
+      - name: Publish RDP Information
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $nodeId = [string]'${{ github.event.inputs.instance_number }}'
+          
+          $summary = @(
+            '## GPU Cloud PC (RDP - Cloudflare Tunnel)',
+            "- Session: $nodeId",
+            "- Address (Host): $env:CF_ADDRESS",
+            "- Username: GPUUser",
+            "- Password: $env:GENERATED_PASSWORD",
+            "",
+            "**Hướng dẫn kết nối:**",
+            "1. Mở Remote Desktop Connection (mstsc) hoặc aRDP.",
+            "2. Nhập Address: $env:CF_ADDRESS (Lưu ý có thể có thêm port đằng sau)",
+            "3. Nhập User và Pass ở trên."
+          )
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Keep session alive
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $hours = 3
+          try { $hours = [int]'${{ github.event.inputs.hours }}' } catch {}
+          if ($hours -lt 1) { $hours = 1 }
+          if ($hours -gt 5) { $hours = 5 }
+          
+          $end = (Get-Date).AddHours($hours)
+          Write-Host "Session ends at: $end"
+          
+          while ((Get-Date) -lt $end) {
+            $svc = Get-Service -Name TermService -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Running') {
+              Start-Service -Name TermService -ErrorAction SilentlyContinue
+            }
+            # Đảm bảo cloudflared luôn chạy
+            $cfProc = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+            if (-not $cfProc) {
+                Start-Process -FilePath "$env:TEMP\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP\cf.log"
+            }
+            
+            $remain = $end - (Get-Date)
+            Write-Host "Remaining: $($remain.ToString('hh\:mm\:ss'))"
+            Start-Sleep -Seconds 60
+          }
+
+      - name: Cleanup
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
