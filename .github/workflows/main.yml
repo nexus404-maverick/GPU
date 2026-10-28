@@ -31,7 +31,7 @@ jobs:
           "GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
           Write-Host "✅ Generated password for RDP user."
 
-            - name: Setup Windows Account & Enable RDP
+      - name: Setup Windows Account & Enable RDP
         shell: powershell
         timeout-minutes: 5
         run: |
