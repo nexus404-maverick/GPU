@@ -68,29 +68,45 @@ jobs:
         Write-Host "Tailscale IP: $tsIP" -ForegroundColor Green
         echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
         
-    - name: Install Google Chrome (Direct)
-      run: |
-        Write-Host "Downloading Google Chrome..." -ForegroundColor Green
-        $chromeUrl = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
-        $installerPath = "$env:TEMP\chrome_installer.exe"
-        Invoke-WebRequest -Uri $chromeUrl -OutFile $installerPath
-        Write-Host "Installing Google Chrome silently..." -ForegroundColor Green
-        Start-Process -FilePath $installerPath -ArgumentList "/silent /install" -Wait
-        Remove-Item $installerPath -Force
-        Write-Host "Google Chrome installed!" -ForegroundColor Green
-        
-    - name: Install 7-Zip (Direct)
-      run: |
-        Write-Host "Downloading 7-Zip..." -ForegroundColor Green
-        $zipUrl = "https://www.7-zip.org/a/7z2409-x64.exe"
-        $installerPath = "$env:TEMP\7z-installer.exe"
-        Invoke-WebRequest -Uri $zipUrl -OutFile $installerPath
-        Write-Host "Installing 7-Zip silently..." -ForegroundColor Green
-        Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
-        Remove-Item $installerPath -Force
-        Write-Host "7-Zip installed!" -ForegroundColor Green
-        
-    - name: Connection Details
+    - name: Install Mesa3D
+     shell: powershell
+     continue-on-error: true
+    run: |
+          Write-Host "=== Installing Mesa3D ===" -ForegroundColor Cyan
+
+          $blocklistKey = "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config"
+          if (Test-Path $blocklistKey) {
+              Set-ItemProperty -Path $blocklistKey -Name "VulnerableDriverBlocklistEnable" -Value 0 -ErrorAction SilentlyContinue
+          }
+
+          New-Item -ItemType Directory -Path "C:\Mesa" -Force | Out-Null
+          $mesaFile = "C:\Mesa\mesa.7z"
+
+          $mesaUrl = "https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z"
+          try {
+              Invoke-WebRequest -Uri $mesaUrl -OutFile $mesaFile -ErrorAction Stop
+          } catch {
+              Write-Host "Mesa download failed, skipping..." -ForegroundColor Yellow
+              exit 0
+          }
+
+          # Tải 7zr standalone
+          Invoke-WebRequest -Uri "https://www.7-zip.org/a/7zr.exe" -OutFile "C:\Mesa\7zr.exe"
+          & "C:\Mesa\7zr.exe" x $mesaFile -oC:\Mesa -y | Out-Null
+
+          # Tìm opengl32.dll cho x64
+          $mesaDll = Get-ChildItem "C:\Mesa" -Recurse -Filter "opengl32.dll" -ErrorAction SilentlyContinue |
+                     Where-Object { $_.DirectoryName -match "x64" } |
+                     Select-Object -First 1
+
+          if ($mesaDll) {
+              Copy-Item "C:\Windows\System32\opengl32.dll" "C:\Windows\System32\opengl32.dll.backup" -Force -ErrorAction SilentlyContinue
+              Copy-Item $mesaDll.FullName "C:\Windows\System32\opengl32.dll" -Force
+              [System.Environment]::SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe", "Machine")
+              [System.Environment]::SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1", "Machine")
+              Write-Host "Mesa3D installed." -ForegroundColor Green
+          }
+           - name: Connection Details
       run: |
         Write-Host "`n=== CONNECTION DETAILS (TAILSCALE) ===" -ForegroundColor Green
         Write-Host "╔══════════════════════════════════════╗" -ForegroundColor Cyan
@@ -106,8 +122,7 @@ jobs:
         Write-Host "2. Log in with the same Tailscale account" -ForegroundColor White
         Write-Host "3. Open Remote Desktop app and enter the IP above" -ForegroundColor White
         Write-Host "4. Use the provided credentials" -ForegroundColor White
-        
-    - name: Keep Session Alive
+           - name: Keep Session Alive
       run: |
         Write-Host "`n=== SESSION ACTIVE ===" -ForegroundColor Green
         Write-Host "EnigMano RDP instance is now running!" -ForegroundColor Cyan
