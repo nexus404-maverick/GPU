@@ -1,146 +1,124 @@
-name: PC criado pelo @alves7.pcm
+name: RDP via Playit.gg
 
 on:
   workflow_dispatch:
-    inputs:
-      instance_number:
-        description: 'Instance Number (1-10)'
-        required: true
-        default: '1'
-        type: string
 
 jobs:
-  deploy-rdp:
+  secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
-    
+
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-      
-    - name: System Information
-      run: |
-        Write-Host "=== ENIGMANO RDP DEPLOYMENT ===" -ForegroundColor Green
-        Write-Host "Instance Number: ${{ github.event.inputs.instance_number }}" -ForegroundColor Yellow
-        Write-Host "Runner: $env:RUNNER_NAME" -ForegroundColor Yellow
-        Write-Host "Workflow: $env:GITHUB_WORKFLOW" -ForegroundColor Yellow
-        
-        Write-Host "`n=== SYSTEM SPECIFICATIONS ===" -ForegroundColor Cyan
-        Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, TotalPhysicalMemory
-        Get-WmiObject -Class Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
-        
-    - name: Enable RDP
-      run: |
-        Write-Host "Enabling Remote Desktop..." -ForegroundColor Green
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-        
-    - name: Create User Account
-      run: |
-        Write-Host "Setting up user account..." -ForegroundColor Green
-        $Password = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
-        Set-LocalUser -Name "runneradmin" -Password $Password
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin"
-        Write-Host "Username: runneradmin" -ForegroundColor Yellow
-        Write-Host "Password: P@ssw0rd!" -ForegroundColor Yellow
-        
-    - name: Install Tailscale (Silent)
-      run: |
-        Write-Host "Downloading Tailscale..." -ForegroundColor Green
-        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-        $installerPath = "$env:TEMP\tailscale.msi"
-        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-        Write-Host "Installing Tailscale silently..." -ForegroundColor Green
-        Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
-        Remove-Item $installerPath -Force
-        Write-Host "Tailscale installed successfully!" -ForegroundColor Green
-        
-    - name: Start Tailscale
-      run: |
-        Write-Host "Starting Tailscale..." -ForegroundColor Green
-        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname "enigmano-${{ github.run_id }}"
-        Start-Sleep -Seconds 15
-        
-    - name: Get Tailscale IP
-      run: |
-        $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-        Write-Host "Tailscale IP: $tsIP" -ForegroundColor Green
-        echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-        
-    - name: Install Mesa3D
-     shell: powershell
-     continue-on-error: true
-    run: |
-          Write-Host "=== Installing Mesa3D ===" -ForegroundColor Cyan
+      - name: Configure Core RDP Settings
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Restart-Service -Name TermService -Force
+          Write-Host "✅ RDP Enabled."
 
-          $blocklistKey = "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config"
-          if (Test-Path $blocklistKey) {
-              Set-ItemProperty -Path $blocklistKey -Name "VulnerableDriverBlocklistEnable" -Value 0 -ErrorAction SilentlyContinue
-          }
+      - name: Create RDP User
+        shell: powershell
+        run: |
+          # Tắt chính sách mật khẩu phức tạp
+          $seceditFile = "$env:TEMP\secpol.inf"
+          $seceditContent = @("[Unicode]", "Unicode=yes", "[System Access]", "PasswordComplexity = 0", "MinimumPasswordLength = 0")
+          Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
+          $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
+          Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
 
-          New-Item -ItemType Directory -Path "C:\Mesa" -Force | Out-Null
-          $mesaFile = "C:\Mesa\mesa.7z"
-
-          $mesaUrl = "https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z"
-          try {
-              Invoke-WebRequest -Uri $mesaUrl -OutFile $mesaFile -ErrorAction Stop
-          } catch {
-              Write-Host "Mesa download failed, skipping..." -ForegroundColor Yellow
-              exit 0
-          }
-
-          # Tải 7zr standalone
-          Invoke-WebRequest -Uri "https://www.7-zip.org/a/7zr.exe" -OutFile "C:\Mesa\7zr.exe"
-          & "C:\Mesa\7zr.exe" x $mesaFile -oC:\Mesa -y | Out-Null
-
-          # Tìm opengl32.dll cho x64
-          $mesaDll = Get-ChildItem "C:\Mesa" -Recurse -Filter "opengl32.dll" -ErrorAction SilentlyContinue |
-                     Where-Object { $_.DirectoryName -match "x64" } |
-                     Select-Object -First 1
-
-          if ($mesaDll) {
-              Copy-Item "C:\Windows\System32\opengl32.dll" "C:\Windows\System32\opengl32.dll.backup" -Force -ErrorAction SilentlyContinue
-              Copy-Item $mesaDll.FullName "C:\Windows\System32\opengl32.dll" -Force
-              [System.Environment]::SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe", "Machine")
-              [System.Environment]::SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1", "Machine")
-              Write-Host "Mesa3D installed." -ForegroundColor Green
-          }
-           - name: Connection Details
-      run: |
-        Write-Host "`n=== CONNECTION DETAILS (TAILSCALE) ===" -ForegroundColor Green
-        Write-Host "╔══════════════════════════════════════╗" -ForegroundColor Cyan
-        Write-Host "║         ENIGMANO RDP ACCESS          ║" -ForegroundColor Cyan  
-        Write-Host "╠══════════════════════════════════════╣" -ForegroundColor Cyan
-        Write-Host "║ Host: $env:TAILSCALE_IP              ║" -ForegroundColor White
-        Write-Host "║ Username: runneradmin                ║" -ForegroundColor White
-        Write-Host "║ Password: P@ssw0rd!                  ║" -ForegroundColor White
-        Write-Host "╚══════════════════════════════════════╝" -ForegroundColor Cyan
-        
-        Write-Host "`nConnection Instructions:" -ForegroundColor Yellow
-        Write-Host "1. Install Tailscale on your device (phone, tablet, Mac, Linux)" -ForegroundColor White
-        Write-Host "2. Log in with the same Tailscale account" -ForegroundColor White
-        Write-Host "3. Open Remote Desktop app and enter the IP above" -ForegroundColor White
-        Write-Host "4. Use the provided credentials" -ForegroundColor White
-           - name: Keep Session Alive
-      run: |
-        Write-Host "`n=== SESSION ACTIVE ===" -ForegroundColor Green
-        Write-Host "EnigMano RDP instance is now running!" -ForegroundColor Cyan
-        Write-Host "Instance will remain active for up to 6 hours." -ForegroundColor Yellow
-        Write-Host "Do not close this window to maintain the connection." -ForegroundColor Red
-        
-        $counter = 0
-        while ($true) {
-          $counter++
-          Write-Host "Session active - Heartbeat #$counter ($(Get-Date))" -ForegroundColor Green
+          # Tạo mật khẩu ngẫu nhiên
+          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | % {[char]$_})
           
-          $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status
-          if ($tsStatus -match "active") {
-            Write-Host "Tailscale status: ACTIVE" -ForegroundColor Green
-          } else {
-            Write-Host "Tailscale status: ERROR - Restarting..." -ForegroundColor Red
-            & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname "enigmano-${{ github.run_id }}"
+          # Tạo user
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "GPUUser" -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "GPUUser" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "GPUUser" -ErrorAction SilentlyContinue
+          
+          "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          Write-Host "✅ User GPUUser Created."
+
+      - name: Install Playit.gg Agent
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $playitUrl = "https://github.com/playit-cloud/playit-agent/releases/download/v0.15.26/playit-windows-x86_64-signed.exe"
+          $playitPath = "$env:TEMP\playit.exe"
+          
+          Write-Host "Downloading Playit.gg Agent..."
+          Invoke-WebRequest -Uri $playitUrl -OutFile $playitPath -UseBasicParsing
+          
+          # Tạo thư mục cấu hình cho Playit
+          $playitDir = "$env:USERPROFILE\.playit"
+          New-Item -ItemType Directory -Path $playitDir -Force | Out-Null
+          
+          # Lưu secret key vào file cấu hình (nếu cần) hoặc chạy trực tiếp
+          # Chúng ta sẽ chạy Playit và truyền secret key qua tham số
+          Write-Host "✅ Playit.gg Agent Downloaded."
+
+      - name: Start Playit.gg Tunnel
+        shell: powershell
+        timeout-minutes: 5
+        env:
+          PLAYIT_SECRET: ${{ secrets.PLAYIT_SECRET }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $playitPath = "$env:TEMP\playit.exe"
+          
+          if ([string]::IsNullOrEmpty($env:PLAYIT_SECRET)) {
+              throw "Chưa cấu hình secret PLAYIT_SECRET. Hãy thêm Secret Key từ Playit.gg vào GitHub Secrets."
           }
           
-          Start-Sleep -Seconds 60
-        }
+          Write-Host "Starting Playit.gg Agent with Secret Key..."
+          
+          # Chạy Playit ngầm với secret key
+          $playitLog = "$env:TEMP\playit.log"
+          Start-Process -FilePath $playitPath -ArgumentList "--secret `"$env:PLAYIT_SECRET`"" -WindowStyle Hidden -RedirectStandardOutput $playitLog
+          
+          Write-Host "Playit.gg Agent is running."
+          Write-Host "Tunnel address is fixed and can be found on your Playit.gg Dashboard."
+          
+          # Đợi một chút để Agent kết nối
+          Start-Sleep -Seconds 15
+          
+          # Kiểm tra xem Playit có đang chạy không
+          $proc = Get-Process -Name "playit" -ErrorAction SilentlyContinue
+          if (-not $proc) {
+              Write-Host "❌ Playit process died. Log output:"
+              if (Test-Path $playitLog) { Get-Content $playitLog }
+              throw "Playit.gg Agent failed to start. Check the log above."
+          }
+          
+          Write-Host "✅ Playit.gg Agent is active (PID: $($proc.Id))."
+
+      - name: Publish Connection Details
+        shell: powershell
+        run: |
+          $summary = @(
+            '## 🖥️ RDP Connection Details (Playit.gg)',
+            "",
+            "**Địa chỉ kết nối (Host:Port):**",
+            "👉 **Lấy trên Dashboard Playit.gg của bạn** (dạng `tên-ngẫu-nhiên.at.playit.gg:12345`)",
+            "",
+            "**Username:** `GPUUser`",
+            "**Password:** `$env:RDP_PASSWORD`",
+            "",
+            "**Hướng dẫn:**",
+            "1. Mở app RDP (mstsc trên PC, aRDP trên Android).",
+            "2. Nhập địa chỉ Playit.gg đã tạo vào ô Host/PC Name.",
+            "3. Nhập Username và Password ở trên.",
+            "",
+            "> ⚠️ **Lưu ý:** Địa chỉ này là **cố định**, không bao giờ thay đổi. Bạn chỉ cần tạo 1 lần trên Playit.gg và dùng mãi mãi."
+          )
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Keep session alive
+        shell: powershell
+        run: |
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Session Active via Playit.gg..."
+              Start-Sleep -Seconds 300
+          }
