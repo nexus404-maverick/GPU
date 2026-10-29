@@ -1,124 +1,360 @@
-name: RDP via Playit.gg
+
+name: PC criado pelo @alves7.pcm
 
 on:
   workflow_dispatch:
+    inputs:
+      instance_number:
+        description: 'Instance Number (1-10)'
+        required: true
+        default: '1'
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
-  secure-rdp:
+  deploy-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: System Information
         shell: powershell
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Restart-Service -Name TermService -Force
-          Write-Host "✅ RDP Enabled."
+          Write-Host "=== RDP DEPLOYMENT ===" -ForegroundColor Green
+          Write-Host "Instance Number: ${{ inputs.instance_number }}" -ForegroundColor Yellow
+          Write-Host "Runner: $env:RUNNER_NAME" -ForegroundColor Yellow
+          Write-Host "Workflow: $env:GITHUB_WORKFLOW" -ForegroundColor Yellow
 
-      - name: Create RDP User
-        shell: powershell
-        run: |
-          # Tắt chính sách mật khẩu phức tạp
-          $seceditFile = "$env:TEMP\secpol.inf"
-          $seceditContent = @("[Unicode]", "Unicode=yes", "[System Access]", "PasswordComplexity = 0", "MinimumPasswordLength = 0")
-          Set-Content -Path $seceditFile -Value $seceditContent -Encoding Unicode
-          $null = secedit /configure /db "$env:TEMP\secpol.sdb" /cfg $seceditFile /areas SECURITYPOLICY 2>&1
-          Remove-Item $seceditFile -Force -ErrorAction SilentlyContinue
+          Write-Host "`n=== SYSTEM SPECIFICATIONS ===" -ForegroundColor Cyan
+          Get-ComputerInfo |
+            Select-Object WindowsProductName, WindowsVersion,
+              @{Name='RAM_GB';Expression={[math]::Round($_.TotalPhysicalMemory / 1GB, 2)}}
 
-          # Tạo mật khẩu ngẫu nhiên
-          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | % {[char]$_})
-          
-          # Tạo user
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "GPUUser" -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Administrators" -Member "GPUUser" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "GPUUser" -ErrorAction SilentlyContinue
-          
-          "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-          Write-Host "✅ User GPUUser Created."
+          Get-CimInstance Win32_Processor |
+            Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
 
-      - name: Install Playit.gg Agent
+      - name: Enable RDP
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $playitUrl = "https://github.com/playit-cloud/playit-agent/releases/download/v0.15.26/playit-windows-x86_64-signed.exe"
-          $playitPath = "$env:TEMP\playit.exe"
-          
-          Write-Host "Downloading Playit.gg Agent..."
-          Invoke-WebRequest -Uri $playitUrl -OutFile $playitPath -UseBasicParsing
-          
-          # Tạo thư mục cấu hình cho Playit
-          $playitDir = "$env:USERPROFILE\.playit"
-          New-Item -ItemType Directory -Path $playitDir -Force | Out-Null
-          
-          # Lưu secret key vào file cấu hình (nếu cần) hoặc chạy trực tiếp
-          # Chúng ta sẽ chạy Playit và truyền secret key qua tham số
-          Write-Host "✅ Playit.gg Agent Downloaded."
 
-      - name: Start Playit.gg Tunnel
+          Write-Host "Enabling Remote Desktop..." -ForegroundColor Green
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' `
+            -Value 0
+
+          # Keep Network Level Authentication enabled.
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'UserAuthentication' `
+            -Value 1
+
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+
+          Write-Host "RDP enabled." -ForegroundColor Green
+
+      - name: Create User Account
         shell: powershell
-        timeout-minutes: 5
         env:
-          PLAYIT_SECRET: ${{ secrets.PLAYIT_SECRET }}
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw 'Missing repository secret: RDP_PASSWORD'
+          }
+
+          $securePassword = ConvertTo-SecureString `
+            $env:RDP_PASSWORD -AsPlainText -Force
+
+          $user = Get-LocalUser -Name 'runneradmin' -ErrorAction SilentlyContinue
+
+          if (-not $user) {
+            throw 'The runneradmin account does not exist on this runner.'
+          }
+
+          Set-LocalUser -Name 'runneradmin' -Password $securePassword
+
+          $group = Get-LocalGroup -SID 'S-1-5-32-555'
+          $member = Get-LocalGroupMember -Group $group.Name |
+            Where-Object { $_.Name -match '\\runneradmin$' }
+
+          if (-not $member) {
+            Add-LocalGroupMember -Group $group.Name -Member 'runneradmin'
+          }
+
+          Write-Host 'RDP account configured.' -ForegroundColor Green
+          Write-Host 'Username: runneradmin'
+          Write-Host 'Password: stored in GitHub Secrets'
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host 'Downloading Tailscale...' -ForegroundColor Green
+
+          $downloadUrl = 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi'
+          $installer = Join-Path $env:TEMP 'tailscale.msi'
+
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $installer
+
+          $install = Start-Process `
+            -FilePath 'msiexec.exe' `
+            -ArgumentList @('/i', "`"$installer`"", '/quiet', '/norestart') `
+            -Wait -PassThru
+
+          Remove-Item $installer -Force -ErrorAction SilentlyContinue
+
+          if ($install.ExitCode -notin @(0, 3010)) {
+            throw "Tailscale installation failed: exit code $($install.ExitCode)"
+          }
+
+          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
+
+          if (-not (Test-Path $tailscale)) {
+            throw 'Tailscale executable was not found after installation.'
+          }
+
+          Write-Host 'Tailscale installed successfully.' -ForegroundColor Green
+
+      - name: Connect Tailscale
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            throw 'Missing repository secret: TAILSCALE_AUTH_KEY'
+          }
+
+          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
+          $hostname = "enigmano-${{ github.run_id }}"
+
+          Write-Host 'Connecting to Tailscale...' -ForegroundColor Green
+
+          & $tailscale up `
+            --authkey="$env:TAILSCALE_AUTH_KEY" `
+            --hostname="$hostname"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Tailscale failed to connect.'
+          }
+
+          Start-Sleep -Seconds 10
+
+          $tsIP = (& $tailscale ip -4 | Select-Object -First 1).Trim()
+
+          if ([string]::IsNullOrWhiteSpace($tsIP)) {
+            throw 'Could not obtain the Tailscale IPv4 address.'
+          }
+
+          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+          Write-Host "Tailscale IP: $tsIP" -ForegroundColor Green
+
+          & $tailscale status
+
+      - name: Install Google Chrome
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host 'Downloading Google Chrome...' -ForegroundColor Green
+
+          $url = 'https://dl.google.com/chrome/install/latest/chrome_installer.exe'
+          $installer = Join-Path $env:TEMP 'chrome_installer.exe'
+
+          Invoke-WebRequest -Uri $url -OutFile $installer
+
+          $process = Start-Process `
+            -FilePath $installer `
+            -ArgumentList '/silent', '/install' `
+            -Wait -PassThru
+
+          Remove-Item $installer -Force -ErrorAction SilentlyContinue
+
+          $chromePaths = @(
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+          )
+
+          if (-not ($chromePaths | Where-Object { Test-Path $_ })) {
+            Write-Warning 'Chrome executable was not found; check installer output.'
+          } else {
+            Write-Host 'Chrome installed.' -ForegroundColor Green
+          }
+
+      - name: Install 7-Zip
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $url = 'https://www.7-zip.org/a/7z2409-x64.exe'
+          $installer = Join-Path $env:TEMP '7zip-installer.exe'
+
+          Write-Host 'Downloading 7-Zip...' -ForegroundColor Green
+          Invoke-WebRequest -Uri $url -OutFile $installer
+
+          $process = Start-Process `
+            -FilePath $installer `
+            -ArgumentList '/S' `
+            -Wait -PassThru
+
+          Remove-Item $installer -Force -ErrorAction SilentlyContinue
+
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+
+          if (-not (Test-Path $sevenZip)) {
+            throw '7-Zip installation failed or executable is missing.'
+          }
+
+          Write-Host '7-Zip installed successfully.' -ForegroundColor Green
+
+      - name: Install Mesa3D
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host 'Finding the latest Mesa3D release...' -ForegroundColor Green
+
+          $headers = @{
+            'User-Agent' = 'RDP-Mesa3D-Installer'
+            'Accept' = 'application/vnd.github+json'
+          }
+
+          $release = Invoke-RestMethod `
+            -Uri 'https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest' `
+            -Headers $headers
+
+          $asset = $release.assets |
+            Where-Object {
+              $_.name -match '^mesa3d-.*-release-msvc\.7z$'
+            } |
+            Select-Object -First 1
+
+          if (-not $asset) {
+            throw 'No matching Mesa3D MSVC archive was found in the latest release.'
+          }
+
+          $archive = Join-Path $env:TEMP 'mesa3d.7z'
+          $extractDir = Join-Path $env:TEMP 'mesa3d-extracted'
+          $installDir = 'C:\Layer7\Mesa3D'
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+
+          Write-Host "Mesa3D archive: $($asset.name)"
+          Invoke-WebRequest `
+            -Uri $asset.browser_download_url `
+            -OutFile $archive `
+            -Headers @{ 'User-Agent' = 'RDP-Mesa3D-Installer' }
+
+          New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+
+          & $sevenZip x $archive "-o$extractDir" -y
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Mesa3D archive extraction failed.'
+          }
+
+          # Find the 64-bit OpenGL implementation in the extracted package.
+          $glDll = Get-ChildItem `
+            -Path $extractDir `
+            -Filter 'opengl32.dll' `
+            -File -Recurse |
+            Where-Object {
+              $_.FullName -match '[\\/]x64[\\/]'
+            } |
+            Select-Object -First 1
+
+          if (-not $glDll) {
+            throw 'Could not find a 64-bit opengl32.dll in the Mesa3D archive.'
+          }
+
+          $mesaSource = $glDll.Directory.FullName
+
+          Write-Host "Copying Mesa files from: $mesaSource"
+
+          Copy-Item `
+            -Path (Join-Path $mesaSource '*') `
+            -Destination $installDir `
+            -Recurse -Force
+
+          if (-not (Test-Path (Join-Path $installDir 'opengl32.dll'))) {
+            throw 'Mesa3D validation failed: opengl32.dll is missing.'
+          }
+
+          # Add the directory to the machine PATH and this job's PATH.
+          $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+
+          if ($machinePath -notlike "*$installDir*") {
+            [Environment]::SetEnvironmentVariable(
+              'Path',
+              "$machinePath;$installDir",
+              'Machine'
+            )
+          }
+
+          "$installDir" >> $env:GITHUB_PATH
+
+          Write-Host 'Mesa3D files installed and validated.' -ForegroundColor Green
+          Write-Host "Mesa3D directory: $installDir"
+
+          Remove-Item $archive -Force -ErrorAction SilentlyContinue
+          Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Connection Details
+        shell: powershell
+        run: |
+          Write-Host ''
+          Write-Host '=== RDP CONNECTION DETAILS ===' -ForegroundColor Green
+          Write-Host "Host: $env:TAILSCALE_IP" -ForegroundColor Cyan
+          Write-Host 'Username: runneradmin' -ForegroundColor Cyan
+          Write-Host 'Password: use the value saved in GitHub Secret RDP_PASSWORD' -ForegroundColor Yellow
+
+          Write-Host ''
+          Write-Host 'Connection instructions:' -ForegroundColor Yellow
+          Write-Host '1. Install Tailscale on the device you will connect from.'
+          Write-Host '2. Sign in to the same tailnet.'
+          Write-Host '3. Open a Remote Desktop client.'
+          Write-Host "4. Connect to $env:TAILSCALE_IP"
+          Write-Host '5. Enter username runneradmin and your RDP_PASSWORD secret.'
+
+      - name: Keep Session Alive
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           $ErrorActionPreference = 'Continue'
-          $playitPath = "$env:TEMP\playit.exe"
-          
-          if ([string]::IsNullOrEmpty($env:PLAYIT_SECRET)) {
-              throw "Chưa cấu hình secret PLAYIT_SECRET. Hãy thêm Secret Key từ Playit.gg vào GitHub Secrets."
-          }
-          
-          Write-Host "Starting Playit.gg Agent with Secret Key..."
-          
-          # Chạy Playit ngầm với secret key
-          $playitLog = "$env:TEMP\playit.log"
-          Start-Process -FilePath $playitPath -ArgumentList "--secret `"$env:PLAYIT_SECRET`"" -WindowStyle Hidden -RedirectStandardOutput $playitLog
-          
-          Write-Host "Playit.gg Agent is running."
-          Write-Host "Tunnel address is fixed and can be found on your Playit.gg Dashboard."
-          
-          # Đợi một chút để Agent kết nối
-          Start-Sleep -Seconds 15
-          
-          # Kiểm tra xem Playit có đang chạy không
-          $proc = Get-Process -Name "playit" -ErrorAction SilentlyContinue
-          if (-not $proc) {
-              Write-Host "❌ Playit process died. Log output:"
-              if (Test-Path $playitLog) { Get-Content $playitLog }
-              throw "Playit.gg Agent failed to start. Check the log above."
-          }
-          
-          Write-Host "✅ Playit.gg Agent is active (PID: $($proc.Id))."
 
-      - name: Publish Connection Details
-        shell: powershell
-        run: |
-          $summary = @(
-            '## 🖥️ RDP Connection Details (Playit.gg)',
-            "",
-            "**Địa chỉ kết nối (Host:Port):**",
-            "👉 **Lấy trên Dashboard Playit.gg của bạn** (dạng `tên-ngẫu-nhiên.at.playit.gg:12345`)",
-            "",
-            "**Username:** `GPUUser`",
-            "**Password:** `$env:RDP_PASSWORD`",
-            "",
-            "**Hướng dẫn:**",
-            "1. Mở app RDP (mstsc trên PC, aRDP trên Android).",
-            "2. Nhập địa chỉ Playit.gg đã tạo vào ô Host/PC Name.",
-            "3. Nhập Username và Password ở trên.",
-            "",
-            "> ⚠️ **Lưu ý:** Địa chỉ này là **cố định**, không bao giờ thay đổi. Bạn chỉ cần tạo 1 lần trên Playit.gg và dùng mãi mãi."
-          )
-          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
+          $counter = 0
 
-      - name: Keep session alive
-        shell: powershell
-        run: |
+          Write-Host 'RDP workflow is running.' -ForegroundColor Green
+          Write-Host 'The GitHub-hosted runner has a finite job lifetime.' -ForegroundColor Yellow
+
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Session Active via Playit.gg..."
-              Start-Sleep -Seconds 300
+            $counter++
+            Write-Host "Heartbeat #$counter - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+
+            & $tailscale status
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning 'Tailscale status failed; attempting to reconnect.'
+
+              & $tailscale up `
+                --authkey="$env:TAILSCALE_AUTH_KEY" `
+                --hostname="enigmano-${{ github.run_id }}"
+            }
+
+            Start-Sleep -Seconds 60
           }
