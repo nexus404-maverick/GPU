@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       customUsername:
-        description: 'Username đăng nhập RDP (Mặc định: Admin)'
+        description: 'RDP Username (Default: Admin)'
         required: false
         default: 'Admin'
       customPassword:
-        description: 'Mật khẩu RDP (Để trống để tự tạo ngẫu nhiên)'
+        description: 'RDP Password (Leave empty to auto-generate)'
         required: false
         default: ''
 
@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # BƯỚC 1: CẤU HÌNH USER VÀ BẬT RDP NỘI BỘ
+      # STEP 1: CREATE USER AND ENABLE RDP
       # ============================================================
       - name: Setup User & Enable RDP
         shell: powershell
@@ -30,9 +30,9 @@ jobs:
           RUSER: ${{ github.event.inputs.customUsername || 'Admin' }}
           RPASS_INPUT: ${{ github.event.inputs.customPassword }}
         run: |
-          Write-Host "Đang thiết lập tài khoản RDP..."
+          Write-Host "Setting up RDP account..."
           
-          # 1. Tạo mật khẩu (Nếu người dùng không nhập, tự tạo ngẫu nhiên)
+          # 1. Generate or use provided password
           if ([string]::IsNullOrEmpty($env:RPASS_INPUT)) {
               $chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$"
               $RPASS = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
@@ -40,74 +40,69 @@ jobs:
               $RPASS = $env:RPASS_INPUT
           }
           
-          # 2. Tạo User và thêm vào nhóm Administrators, nhóm Remote Desktop Users
+          # 2. Create User and add to Administrators & Remote Desktop Users
           $SecurePass = ConvertTo-SecureString $RPASS -AsPlainText -Force
           
-          # Kiểm tra xem user đã tồn tại chưa
           $userExists = Get-LocalUser -Name $env:RUSER -ErrorAction SilentlyContinue
           if (-not $userExists) {
               New-LocalUser -Name $env:RUSER -Password $SecurePass -FullName "ThyoCloud User" -Description "RDP Account" -PasswordNeverExpires
-              Write-Host "Đã tạo user mới: $env:RUSER"
+              Write-Host "Created new user: $env:RUSER"
           } else {
               Set-LocalUser -Name $env:RUSER -Password $SecurePass
-              Write-Host "Đã cập nhật mật khẩu cho user: $env:RUSER"
+              Write-Host "Updated password for user: $env:RUSER"
           }
           
           Add-LocalGroupMember -Group "Administrators" -Member $env:RUSER -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RUSER -ErrorAction SilentlyContinue
 
-          # 3. Bật RDP và tắt xác thực NLA (để dễ kết nối từ bên ngoài)
+          # 3. Enable RDP and disable NLA (Network Level Authentication)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           
-          # 4. Mở Firewall cho RDP
+          # 4. Open Firewall for RDP
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
 
-          # 5. Lưu thông tin vào GITHUB_ENV
+          # 5. Save to GITHUB_ENV
           "RDP_USER=$env:RUSER" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
           
-          Write-Host "Cấu hình RDP hoàn tất."
+          Write-Host "RDP configuration completed."
 
       # ============================================================
-      # BƯỚC 2: LẤY IP CÔNG KHAI CỦA MÁY ẢO
+      # STEP 2: GET PUBLIC IP
       # ============================================================
       - name: Get Public IP
         id: get_ip
         shell: powershell
         run: |
-          Write-Host "Đang lấy IP công khai..."
+          Write-Host "Fetching public IP..."
           $ip = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
-          Write-Host "IP của máy ảo là: $ip"
+          Write-Host "Machine Public IP: $ip"
           "RDP_IP=$ip" >> $env:GITHUB_ENV
 
       # ============================================================
-      # BƯỚC 3: ĐỔI HÌNH NỀN TỪ THƯ MỤC WALLPAPER
+      # STEP 3: SET WALLPAPER
       # ============================================================
       - name: Set Wallpaper
         shell: powershell
         run: |
-          Write-Host "Đang thiết lập hình nền..."
+          Write-Host "Setting up wallpaper..."
           
-          # Đường dẫn tới file ảnh trong repo
           $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
           
           if (-not (Test-Path $LocalWallpaper)) {
-              Write-Host "[WARNING] Không tìm thấy file Wallpaper/wallpaper.png. Bỏ qua bước đổi hình nền."
+              Write-Host "[WARNING] Wallpaper file not found at Wallpaper/wallpaper.png. Skipping."
               exit 0
           }
 
-          # Copy ảnh vào thư mục hệ thống
           $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
           Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
           
-          # Chạy script đổi hình nền
           $RegPath = "HKCU:\Control Panel\Desktop"
           Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
-          Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10" # 10 = Fill
+          Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
           Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
           
-          # Refresh hình nền ngay lập tức
           Add-Type -TypeDefinition @"
           using System;
           using System.Runtime.InteropServices;
@@ -118,33 +113,33 @@ jobs:
           "@
           [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
           
-          Write-Host "[SUCCESS] Đã đổi hình nền thành công!"
+          Write-Host "[SUCCESS] Wallpaper changed successfully!"
 
       # ============================================================
-      # BƯỚC 4: XUẤT THÔNG TIN KẾT NỐI RA MÀN HÌNH
+      # STEP 4: PUBLISH CONNECTION DETAILS (ENGLISH ONLY)
       # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
-          $summary = @(
-            '## ThyoCloud Workspace (Self-Hosted RDP)',
-            '',
-            '### Thông tin kết nối:',
-            '- **IP:** `' + $env:RDP_IP + '`',
-            '- **Username:** `' + $env:RDP_USER + '`',
-            '- **Password:** `' + $env:RDP_PASS + '`',
-            '',
-            '**Hướng dẫn kết nối:**',
-            '1. Mở ứng dụng **Remote Desktop Connection** (mstsc) trên máy tính của bạn.',
-            '2. Nhập IP ở trên vào ô "Computer".',
-            '3. Nhập Username và Password khi được hỏi.',
-            '',
-            '> **Lưu ý:** Nếu kết nối bị từ chối, hãy đợi 1-2 phút để máy ảo khởi động hoàn tất dịch vụ RDP.'
-          )
+          $summary = @()
+          $summary += "## ThyoCloud Workspace (Self-Hosted RDP)"
+          $summary += ""
+          $summary += "### Connection Details:"
+          $summary += "- **IP Address:** ``$env:RDP_IP``"
+          $summary += "- **Username:** ``$env:RDP_USER``"
+          $summary += "- **Password:** ``$env:RDP_PASS``"
+          $summary += ""
+          $summary += "### How to connect:"
+          $summary += "1. Open **Remote Desktop Connection** (mstsc) on your PC."
+          $summary += "2. Enter the IP Address in the 'Computer' field."
+          $summary += "3. Enter the Username and Password when prompted."
+          $summary += ""
+          $summary += "> **Note:** If connection is refused, wait 1-2 minutes for the RDP service to fully start."
+          
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       # ============================================================
-      # BƯỚC 5: GIỮ SESSION SỐNG (GIỮ MÁY ẢO KHÔNG BỊ TẮT)
+      # STEP 5: KEEP SESSION ALIVE
       # ============================================================
       - name: Keep session alive
         shell: powershell
