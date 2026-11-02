@@ -1,7 +1,16 @@
-name: ThyoCloud Serveo RDP + RustDesk Setup
+name: ThyoCloud Workspace (Serveo RDP + Keep-Alive + Wallpaper)
 
 on:
   workflow_dispatch:
+    inputs:
+      customUsername:
+        description: 'RDP Username (Default: Admin)'
+        required: false
+        default: 'Admin'
+      customPassword:
+        description: 'RDP Password (Leave empty to auto-generate)'
+        required: false
+        default: ''
 
 jobs:
   deploy-workspace:
@@ -13,215 +22,196 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # STEP 1: START TEMPORARY HTTP SERVER (Showing "Preparing...")
+      # STEP 1: CREATE USER AND ENABLE RDP
       # ============================================================
-      - name: Start Temporary HTTP Server
+      - name: Setup User & Enable RDP
+        shell: powershell
+        env:
+          RUSER: ${{ github.event.inputs.customUsername || 'Admin' }}
+          RPASS_INPUT: ${{ github.event.inputs.customPassword }}
+        run: |
+          Write-Host "Setting up RDP account..."
+          if ([string]::IsNullOrEmpty($env:RPASS_INPUT)) {
+              $chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$"
+              $RPASS = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+          } else { $RPASS = $env:RPASS_INPUT }
+          
+          $SecurePass = ConvertTo-SecureString $RPASS -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $env:RUSER -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $env:RUSER -Password $SecurePass -FullName "ThyoCloud User" -PasswordNeverExpires
+          } else { Set-LocalUser -Name $env:RUSER -Password $SecurePass }
+          Add-LocalGroupMember -Group "Administrators" -Member $env:RUSER -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RUSER -ErrorAction SilentlyContinue
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+
+          "RDP_USER=$env:RUSER" >> $env:GITHUB_ENV
+          "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
+          Write-Host "RDP configuration completed."
+
+      # ============================================================
+      # STEP 2: SET WALLPAPER (Áp dụng cho cả User RDP mới)
+      # ============================================================
+      - name: Set Wallpaper
         shell: powershell
         run: |
-          $port = 8080
-          $html = @"
-          <!DOCTYPE html>
-          <html>
-          <head><title>ThyoCloud Workspace</title><meta charset='utf-8'></head>
-          <body style='font-family: Arial; text-align: center; margin-top: 100px;'>
-              <h1 style='color: #0078D4;'>⏳ Preparing your workspace...</h1>
-              <p>RustDesk is being installed and configured. Please wait.</p>
-              <p>This page will automatically update soon.</p>
-          </body>
-          </html>
+          Write-Host "Setting up wallpaper..."
+          $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
+          
+          if (-not (Test-Path $LocalWallpaper)) { 
+              Write-Host "[WARNING] Wallpaper not found. Skipping."
+              exit 0 
+          }
+          
+          $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
+          Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
+          
+          # 1. Set cho User hiện tại (Runner)
+          $RegPath = "HKCU:\Control Panel\Desktop"
+          Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
+          Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
+          Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
+          
+          # 2. Set cho User Mặc định (Để khi bạn login bằng User RDP vừa tạo, hình nền cũng đổi theo)
+          try {
+              reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
+              $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
+              Set-ItemProperty -Path $DefaultRegPath -Name Wallpaper -Value $DestWallpaper
+              Set-ItemProperty -Path $DefaultRegPath -Name WallpaperStyle -Value "10"
+              Set-ItemProperty -Path $DefaultRegPath -Name TileWallpaper -Value "0"
+              reg unload "HKU\DefaultUser" | Out-Null
+              Write-Host "Default user wallpaper updated."
+          } catch {
+              Write-Host "[WARNING] Could not update default user wallpaper: $_"
+          }
+          
+          # 3. Refresh lại giao diện để áp dụng ngay
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Wallpaper {
+              [DllImport("user32.dll", CharSet = CharSet.Auto)]
+              public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+          }
           "@
-          
-          # Lưu nội dung HTML ra file tạm để server đọc lại sau này
-          $html | Out-File -FilePath "$env:RUNNER_TEMP\index.html" -Encoding utf8
-          
-          # Tạo một background job chạy HTTP server đơn giản
-          $job = Start-Job -ScriptBlock {
-              param($p, $file)
-              $listener = [System.Net.HttpListener]::new()
-              $listener.Prefixes.Add("http://localhost:$p/")
-              $listener.Start()
-              Write-Host "HTTP Server listening on port $p"
-              while ($listener.IsListening) {
-                  $context = $listener.GetContext()
-                  $content = Get-Content $file -Raw -ErrorAction SilentlyContinue
-                  if (-not $content) { $content = "<h1>Preparing...</h1>" }
-                  $buffer = [System.Text.Encoding]::UTF8.GetBytes($content)
-                  $context.Response.ContentLength64 = $buffer.Length
-                  $context.Response.OutputStream.Write($buffer, 0, $buffer.Length)
-                  $context.Response.OutputStream.Close()
-              }
-          } -ArgumentList $port, "$env:RUNNER_TEMP\index.html"
-          
-          Start-Sleep -Seconds 2
-          Write-Host "Temporary HTTP server started (Job ID: $($job.Id))."
+          [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
+          Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 2: START SERVEO TUNNELS (HTTP + TCP 3389)
+      # STEP 3: BACKGROUND TCP PROBE (Giữ kết nối không bị ngắt)
       # ============================================================
-      - name: Start Serveo Tunnels
+      - name: Start TCP Probe Background Job
         shell: powershell
         run: |
-          # 2.1. HTTP tunnel for the notification page (port 80 -> local 8080)
-          Write-Host "Starting Serveo HTTP tunnel for notification page..."
-          $httpLog = "$env:RUNNER_TEMP\serveo_http.log"
-          Start-Process -FilePath "ssh" -ArgumentList "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -R 80:localhost:8080 serveo.net" -RedirectStandardOutput $httpLog -RedirectStandardError "$env:RUNNER_TEMP\serveo_http.err" -WindowStyle Hidden
+          Write-Host "Starting TCP probe (1 byte/sec) to keep tunnel active..."
           
-          # 2.2. TCP tunnel for RDP (port 3389 -> local 3389)
-          Write-Host "Starting Serveo TCP tunnel for RDP (port 3389)..."
-          $tcpLog = "$env:RUNNER_TEMP\serveo_tcp.log"
-          Start-Process -FilePath "ssh" -ArgumentList "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -R 3389:localhost:3389 serveo.net" -RedirectStandardOutput $tcpLog -RedirectStandardError "$env:RUNNER_TEMP\serveo_tcp.err" -WindowStyle Hidden
-          
-          Start-Sleep -Seconds 10
-          
-          # 2.3. Extract public URLs from Serveo logs
-          $httpUrl = $null
-          $tcpAddress = $null
-          
-          if (Test-Path $httpLog) {
-              $httpContent = Get-Content $httpLog -Raw
-              if ($httpContent -match 'https://([a-zA-Z0-9]+\.serveo\.net)') {
-                  $httpUrl = $matches[1]
-                  Write-Host "Serveo HTTP URL: $httpUrl"
+          $probeJob = Start-Job -ScriptBlock {
+              while ($true) {
+                  try {
+                      $client = New-Object System.Net.Sockets.TcpClient
+                      $client.Connect("127.0.0.1", 3389)
+                      $stream = $client.GetStream()
+                      $byte = [byte[]]@(0)
+                      $stream.Write($byte, 0, 1)
+                      $stream.Flush()
+                      $client.Close()
+                  } catch {}
+                  Start-Sleep -Seconds 1
               }
           }
           
-          if (Test-Path $tcpLog) {
-              $tcpContent = Get-Content $tcpLog -Raw
-              # Serveo prints something like "Forwarding TCP connections from serveo.net:12345"
-              if ($tcpContent -match 'serveo\.net:(\d+)') {
-                  $tcpPort = $matches[1]
-                  $tcpAddress = "serveo.net:$tcpPort"
-                  Write-Host "Serveo TCP Address for RDP: $tcpAddress"
-              }
-          }
-          
-          if (-not $httpUrl) { Write-Host "[WARNING] Could not detect HTTP URL from Serveo log. Check $httpLog" }
-          if (-not $tcpAddress) { Write-Host "[WARNING] Could not detect TCP address from Serveo log. Check $tcpLog" }
-          
-          "HTTP_URL=$httpUrl" >> $env:GITHUB_ENV
-          "TCP_RDP_ADDR=$tcpAddress" >> $env:GITHUB_ENV
+          Write-Host "TCP Probe Job started (ID: $($probeJob.Id))."
+          "PROBE_JOB_ID=$($probeJob.Id)" >> $env:GITHUB_ENV
 
       # ============================================================
-      # STEP 3: INSTALL RUSTDESK AND GET ID/PASSWORD
+      # STEP 4: START SERVEO TUNNEL (Có SSH Keep-Alive)
       # ============================================================
-      - name: Install RustDesk & Retrieve Credentials
+      - name: Start Serveo Tunnel for RDP
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
-          $installer = "$env:RUNNER_TEMP\rustdesk.exe"
-          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.exe"
+          Write-Host "Starting Serveo tunnel for RDP (port 3389)..."
           
-          Write-Host "Downloading RustDesk 1.2.6..."
-          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
-          
-          Write-Host "Installing RustDesk silently..."
-          $proc = Start-Process -FilePath $installer -ArgumentList "--silent-install" -PassThru -Verb RunAs -WindowStyle Hidden
-          if (-not $proc.WaitForExit(120000)) {
-              $proc.Kill()
-              throw "RustDesk installation timed out."
+          if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+              Write-Host "Installing OpenSSH Client..."
+              Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 | Out-Null
           }
+
+          $logFile = "$env:RUNNER_TEMP\serveo.log"
           
-          Start-Sleep -Seconds 10
-          $rustdeskExe = "C:\Program Files\RustDesk\rustdesk.exe"
-          if (-not (Test-Path $rustdeskExe)) { throw "RustDesk executable not found." }
+          $sshArgs = @(
+              "-o", "StrictHostKeyChecking=no",
+              "-o", "UserKnownHostsFile=NUL",
+              "-o", "ServerAliveInterval=1",      # Heartbeat mỗi 1s
+              "-o", "ServerAliveCountMax=3",      # Ngắt nếu mất kết nối 3s
+              "-o", "ExitOnForwardFailure=yes",
+              "-R", "3389:localhost:3389",
+              "serveo.net"
+          )
           
-          # Generate random password
-          $chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-          $rustdeskPw = -join (1..10 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-          Write-Host "Applying RustDesk password..."
-          Start-Process -FilePath $rustdeskExe -ArgumentList "--password `"$rustdeskPw`"" -Wait -WindowStyle Hidden
+          Start-Process -FilePath "ssh" -ArgumentList $sshArgs -RedirectStandardOutput $logFile -RedirectStandardError "$env:RUNNER_TEMP\serveo.err" -WindowStyle Hidden
           
-          # Retrieve ID
-          Write-Host "Retrieving RustDesk ID..."
-          $rustdeskId = $null
-          for ($i=1; $i -le 10 -and -not $rustdeskId; $i++) {
-              $output = & $rustdeskExe --get-id 2>&1
-              foreach ($line in $output) {
-                  if (([string]$line).Trim() -match '^\d{9,10}$') { $rustdeskId = $matches[0]; break }
+          Write-Host "Waiting for Serveo to assign a public address..."
+          Start-Sleep -Seconds 15
+          
+          $serveoAddress = $null
+          $attempts = 0
+          while (-not $serveoAddress -and $attempts -lt 20) {
+              Start-Sleep -Seconds 2
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+                  if ($content -match 'serveo\.net:(\d+)') {
+                      $serveoPort = $matches[1]
+                      $serveoAddress = "serveo.net:$serveoPort"
+                  }
               }
-              if (-not $rustdeskId) { Start-Sleep -Seconds 3 }
+              $attempts++
           }
-          if (-not $rustdeskId) { throw "Failed to get RustDesk ID." }
           
-          Write-Host "RustDesk ID: $rustdeskId | Password: $rustdeskPw"
-          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
-          "RUSTDESK_PASS=$rustdeskPw" >> $env:GITHUB_ENV
-          
-          # Kill RustDesk GUI to save RAM (headless mode)
-          Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
+          if ($serveoAddress) {
+              Write-Host "======================================================="
+              Write-Host "SERVEO PUBLIC ADDRESS: $serveoAddress"
+              Write-Host "======================================================="
+              "SERVEO_ADDR=$serveoAddress" >> $env:GITHUB_ENV
+          } else {
+              Write-Host "[ERROR] Could not detect Serveo address."
+              if (Test-Path "$env:RUNNER_TEMP\serveo.err") { Get-Content "$env:RUNNER_TEMP\serveo.err" -Tail 20 | Write-Host }
+              throw "Failed to establish Serveo tunnel."
+          }
 
       # ============================================================
-      # STEP 4: UPDATE HTTP PAGE WITH FINAL INSTRUCTIONS
+      # STEP 5: PUBLISH CONNECTION DETAILS
       # ============================================================
-      - name: Update Notification Page
-        shell: powershell
-        run: |
-          # Prepare the final HTML with connection details
-          $httpUrl = $env:HTTP_URL
-          $tcpAddr = $env:TCP_RDP_ADDR
-          $rId = $env:RUSTDESK_ID
-          $rPw = $env:RUSTDESK_PASS
-          $user = "Admin" # Default RDP user, or adjust if you created a custom one
-          
-          $finalHtml = @"
-          <!DOCTYPE html>
-          <html>
-          <head><title>ThyoCloud Workspace - Ready</title><meta charset='utf-8'></head>
-          <body style='font-family: Arial; text-align: center; margin-top: 80px;'>
-              <h1 style='color: #28a745;'>✅ Workspace is Ready!</h1>
-              <h2 style='color: #dc3545; font-size: 2.5em;'>⚠️ PLEASE REVISIT THE WEBSITE TO GET NEW INFORMATION</h2>
-              <p>Your remote connection details have been generated.</p>
-              <hr style='width: 50%;'>
-              <h3>🖥️ RDP via Serveo</h3>
-              <p><strong>Address:</strong> <code>$tcpAddr</code></p>
-              <p><strong>Username:</strong> <code>$user</code></p>
-              <p><strong>Password:</strong> <code>(Check your GitHub Actions summary for RDP password)</code></p>
-              <h3>📱 RustDesk</h3>
-              <p><strong>ID:</strong> <code>$rId</code></p>
-              <p><strong>Password:</strong> <code>$rPw</code></p>
-              <hr style='width: 50%;'>
-              <p>Refresh this page if you don't see the details above.</p>
-              <p><small>Powered by ThyoCloud & Serveo</small></p>
-          </body>
-          </html>
-          "@
-          
-          # Overwrite the temporary index.html with the final content
-          $finalHtml | Out-File -FilePath "$env:RUNNER_TEMP\index.html" -Encoding utf8
-          Write-Host "Final notification page updated."
-
-      # ============================================================
-      # STEP 5: PUBLISH GITHUB SUMMARY
-      # ============================================================
-      - name: Publish Connection Details to Summary
+      - name: Publish Connection Details
         shell: powershell
         run: |
           $summary = @()
-          $summary += "## ThyoCloud Workspace (Serveo RDP + RustDesk)"
+          $summary += "## ThyoCloud Workspace (Serveo RDP + Keep-Alive)"
           $summary += ""
-          $summary += "### 🌐 Notification Page (Visit this first):"
-          $summary += "- **URL:** ``https://$env:HTTP_URL``"
+          $summary += "### 🔗 Public Address:"
+          $summary += "- **``$env:SERVEO_ADDR``**"
           $summary += ""
-          $summary += "### 🖥️ RDP via Serveo (After page updates):"
-          $summary += "- **Address:** ``$env:TCP_RDP_ADDR``"
-          $summary += "- **Username:** ``Admin``"
-          $summary += "- **Password:** ``(See below)``"
+          $summary += "### 🔑 Credentials:"
+          $summary += "- **Username:** ``$env:RDP_USER``"
+          $summary += "- **Password:** ``$env:RDP_PASS``"
           $summary += ""
-          $summary += "### 📱 RustDesk:"
-          $summary += "- **ID:** ``$env:RUSTDESK_ID``"
-          $summary += "- **Password:** ``$env:RUSTDESK_PASS``"
+          $summary += "### 📖 How to connect:"
+          $summary += "1. Open **Remote Desktop Connection** (mstsc)."
+          $summary += "2. Enter the Public Address above in the 'Computer' field."
+          $summary += "3. Enter the Username and Password when prompted."
           $summary += ""
-          $summary += "> **Note:** The notification page will change automatically. Revisit it after ~2 minutes to see the final details."
+          $summary += "> **Status:** Wallpaper applied, TCP Probe & SSH Keep-Alive active."
           
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       # ============================================================
-      # STEP 6: KEEP SESSION ALIVE
+      # STEP 6: KEEP SESSION ALIVE (Main Loop)
       # ============================================================
-      - name: Keep Session Alive
+      - name: Keep session alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Serveo tunnels & HTTP server running..."
+              Write-Host "[$(Get-Date)] Session Active - Serveo Tunnel & TCP Probe running..."
               Start-Sleep -Seconds 300
           }
