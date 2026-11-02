@@ -40,6 +40,7 @@ jobs:
           if (-not (Get-LocalUser -Name $env:RUSER -ErrorAction SilentlyContinue)) {
               New-LocalUser -Name $env:RUSER -Password $SecurePass -FullName "ThyoCloud User" -PasswordNeverExpires
           } else { Set-LocalUser -Name $env:RUSER -Password $SecurePass }
+          
           Add-LocalGroupMember -Group "Administrators" -Member $env:RUSER -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RUSER -ErrorAction SilentlyContinue
 
@@ -52,7 +53,7 @@ jobs:
           Write-Host "RDP configuration completed."
 
       # ============================================================
-      # STEP 2: SET WALLPAPER (Áp dụng cho cả User RDP mới)
+      # STEP 2: SET WALLPAPER (Applies to Current and Default User)
       # ============================================================
       - name: Set Wallpaper
         shell: powershell
@@ -66,11 +67,13 @@ jobs:
           $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
           Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
           
+          # Set for current user
           $RegPath = "HKCU:\Control Panel\Desktop"
           Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
           Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
           Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
           
+          # Set for Default user (so new RDP users get it too)
           try {
               reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
               $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
@@ -78,9 +81,9 @@ jobs:
               Set-ItemProperty -Path $DefaultRegPath -Name WallpaperStyle -Value "10"
               Set-ItemProperty -Path $DefaultRegPath -Name TileWallpaper -Value "0"
               reg unload "HKU\DefaultUser" | Out-Null
-              Write-Host "Default user wallpaper updated."
-          } catch { Write-Host "[WARNING] Could not update default user wallpaper: $_" }
+          } catch { Write-Host "[WARNING] Could not update default user wallpaper." }
           
+          # Apply immediately
           Add-Type -TypeDefinition @"
           using System;
           using System.Runtime.InteropServices;
@@ -93,7 +96,7 @@ jobs:
           Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 3: BACKGROUND TCP PROBE (Lớp Keep-Alive 1: Gửi 1 byte/giây)
+      # STEP 3: BACKGROUND TCP PROBE (Keep-Alive Layer 1)
       # ============================================================
       - name: Start TCP Probe Background Job
         shell: powershell
@@ -116,28 +119,27 @@ jobs:
           "PROBE_JOB_ID=$($probeJob.Id)" >> $env:GITHUB_ENV
 
       # ============================================================
-      # STEP 4: START BORE TUNNEL + AUTO-RESTART (Lớp Keep-Alive 2)
+      # STEP 4: START BORE TUNNEL + AUTO-RESTART (Keep-Alive Layer 2)
       # ============================================================
       - name: Start Bore Tunnel for RDP
         shell: powershell
         run: |
           Write-Host "Downloading Bore (Windows binary)..."
           $boreZip = "$env:RUNNER_TEMP\bore.zip"
-          $boreExe = "$env:RUNNER_TEMP\bore.exe"
           
-          # Tải bản bore mới nhất cho Windows từ GitHub Releases
+          # Updated download URL for v0.6.0
           Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip" -OutFile $boreZip
           Expand-Archive -Path $boreZip -DestinationPath "$env:RUNNER_TEMP\bore" -Force
-          # File thực thi sau khi giải nén thường nằm trong thư mục bore
+          
           $borePath = (Get-ChildItem -Path "$env:RUNNER_TEMP\bore" -Filter "bore*.exe" -Recurse | Select-Object -First 1).FullName
           if (-not $borePath) { throw "Bore executable not found after extraction." }
           
-          Write-Host "Bore executable: $borePath"
+          Write-Host "Bore executable found: $borePath"
           
           $logFile = "$env:RUNNER_TEMP\bore.log"
           $boreAddress = $null
           
-          # Vòng lặp giám sát: nếu Bore chết, tự khởi động lại
+          # Monitor loop: Restart Bore if it dies
           Write-Host "Starting Bore tunnel monitor..."
           $boreJob = Start-Job -ScriptBlock {
               param($boreExe, $logFile)
@@ -145,9 +147,9 @@ jobs:
                   $proc = Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err" -PassThru -WindowStyle Hidden
                   Write-Host "[Bore Monitor] Started Bore (PID: $($proc.Id))"
                   
-                  # Chờ cho đến khi tiến trình Bore thoát
+                  # Wait for process to exit
                   $proc.WaitForExit()
-                  Write-Host "[Bore Monitor] Bore exited with code $($proc.ExitCode). Restarting in 3 seconds..."
+                  Write-Host "[Bore Monitor] Bore exited. Restarting in 3 seconds..."
                   Start-Sleep -Seconds 3
               }
           } -ArgumentList $borePath, $logFile
@@ -160,7 +162,6 @@ jobs:
               Start-Sleep -Seconds 2
               if (Test-Path $logFile) {
                   $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-                  # Bore in ra dòng: "listening at bore.pub:PORT"
                   if ($content -match 'bore\.pub:(\d+)') {
                       $borePort = $matches[1]
                       $boreAddress = "bore.pub:$borePort"
@@ -176,34 +177,32 @@ jobs:
               "BORE_ADDR=$boreAddress" >> $env:GITHUB_ENV
           } else {
               Write-Host "[ERROR] Could not detect Bore address after $attempts attempts."
-              if (Test-Path "$logFile") { Get-Content "$logFile" -Tail 20 | Write-Host }
               throw "Failed to establish Bore tunnel."
           }
 
       # ============================================================
-      # STEP 5: PUBLISH CONNECTION DETAILS
+      # STEP 5: PUBLISH CONNECTION DETAILS (ASCII-SAFE VERSION)
       # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
-          $summary = @()
-          $summary += "## ThyoCloud Workspace (Bore RDP + Keep-Alive)"
-          $summary += ""
-          $summary += "### 🔗 Public Address:"
-          $summary += "- **``$env:BORE_ADDR``**"
-          $summary += ""
-          $summary += "### 🔑 Credentials:"
-          $summary += "- **Username:** ``$env:RDP_USER``"
-          $summary += "- **Password:** ``$env:RDP_PASS``"
-          $summary += ""
-          $summary += "### 📖 How to connect:"
-          $summary += "1. Open **Remote Desktop Connection** (mstsc)."
-          $summary += "2. Enter the Public Address above in the 'Computer' field."
-          $summary += "3. Enter the Username and Password when prompted."
-          $summary += ""
-          $summary += "> **Keep-Alive Active:** TCP probe (1 byte/sec) + automatic Bore restart monitor."
+          $summaryFile = $env:GITHUB_STEP_SUMMARY
           
-          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Bore RDP + Keep-Alive)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Public Address:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **``$env:BORE_ADDR``**" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Credentials:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Open **Remote Desktop Connection** (mstsc)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Enter the Public Address above in the 'Computer' field." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "3. Enter the Username and Password when prompted." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "> **Keep-Alive Active:** TCP probe (1 byte/sec) + automatic Bore restart monitor." -Encoding utf8
 
       # ============================================================
       # STEP 6: KEEP SESSION ALIVE (Main Loop)
