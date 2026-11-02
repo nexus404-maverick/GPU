@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (NetBird Proxy)
+name: ThyoCloud Workspace (NetBird RDP Proxy)
 
 on:
   workflow_dispatch:
@@ -21,6 +21,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # STEP 1: CREATE USER AND ENABLE RDP
+      # ============================================================
       - name: Setup User & Enable RDP
         shell: powershell
         env:
@@ -47,24 +50,50 @@ jobs:
 
           "RDP_USER=$env:RUSER" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
+          Write-Host "RDP configuration completed."
 
+      # ============================================================
+      # STEP 2: SET WALLPAPER
+      # ============================================================
       - name: Set Wallpaper
         shell: powershell
         run: |
+          Write-Host "Setting up wallpaper..."
           $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
-          if (Test-Path $LocalWallpaper) {
-              $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
-              Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
-              $RegPath = "HKCU:\Control Panel\Desktop"
-              Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
-              Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
-              Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
-              Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class W { [DllImport(\"user32.dll\")] public static extern int SystemParametersInfo(int a, int b, string c, int d); }"
-              [W]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
+          if (-not (Test-Path $LocalWallpaper)) { 
+              Write-Host "[WARNING] Wallpaper not found. Skipping."; exit 0 
           }
+          
+          $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
+          Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
+          
+          $RegPath = "HKCU:\Control Panel\Desktop"
+          Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
+          Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
+          Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
+          
+          try {
+              reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
+              $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
+              Set-ItemProperty -Path $DefaultRegPath -Name Wallpaper -Value $DestWallpaper
+              Set-ItemProperty -Path $DefaultRegPath -Name WallpaperStyle -Value "10"
+              Set-ItemProperty -Path $DefaultRegPath -Name TileWallpaper -Value "0"
+              reg unload "HKU\DefaultUser" | Out-Null
+          } catch { Write-Host "[WARNING] Could not update default user wallpaper." }
+          
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Wallpaper {
+              [DllImport("user32.dll", CharSet = CharSet.Auto)]
+              public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+          }
+          "@
+          [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
+          Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # BƯỚC QUAN TRỌNG: CÀI ĐẶT NETBIRD
+      # STEP 3: INSTALL AND CONNECT NETBIRD
       # ============================================================
       - name: Install and Connect NetBird
         shell: powershell
@@ -77,20 +106,74 @@ jobs:
           Write-Host "Installing NetBird silently..."
           Start-Process -FilePath ".\netbird_installer.exe" -ArgumentList "/S" -Wait
           
-          Write-Host "Starting NetBird service and connecting..."
-          # Đường dẫn mặc định của NetBird trên Windows
+          Write-Host "Connecting to NetBird network..."
           $nbExe = "C:\Program Files\NetBird\netbird.exe"
           
-          # Kết nối vào mạng NetBird bằng Setup Key
-          & $nbExe up --setup-key $env:NB_SETUP_KEY --daemon-addr unix:///var/run/netbird.sock
-          
-          # (Tùy chọn) Nếu lệnh trên báo lỗi, thử dùng lệnh này:
-          # & $nbExe up --setup-key $env:NB_SETUP_KEY
+          # Kết nối vào mạng NetBird
+          & $nbExe up --setup-key $env:NB_SETUP_KEY
           
           Start-Sleep -Seconds 5
-          Write-Host "NetBird status:"
+          
+          Write-Host "NetBird Status:"
           & $nbExe status
+          
+          # Lấy IP nội bộ NetBird để in ra cho bạn dễ nhìn
+          $nbIP = (& $nbExe status) | Select-String -Pattern 'NetBird IP: (\d+\.\d+\.\d+\.\d+)' | ForEach-Object { $_.Matches.Groups[1].Value }
+          "NB_IP=$nbIP" >> $env:GITHUB_ENV
 
+      # ============================================================
+      # STEP 4: BACKGROUND TCP PROBE (Keep-Alive)
+      # ============================================================
+      - name: Start TCP Probe Background Job
+        shell: powershell
+        run: |
+          Write-Host "Starting TCP probe (1 byte/sec) to keep RDP session alive..."
+          $probeJob = Start-Job -ScriptBlock {
+              while ($true) {
+                  try {
+                      $client = New-Object System.Net.Sockets.TcpClient
+                      $client.Connect("127.0.0.1", 3389)
+                      $stream = $client.GetStream()
+                      $stream.Write([byte[]]@(0), 0, 1)
+                      $stream.Flush()
+                      $client.Close()
+                  } catch {}
+                  Start-Sleep -Seconds 1
+              }
+          }
+          Write-Host "TCP Probe Job started (ID: $($probeJob.Id))."
+          "PROBE_JOB_ID=$($probeJob.Id)" >> $env:GITHUB_ENV
+
+      # ============================================================
+      # STEP 5: PUBLISH CONNECTION DETAILS (ASCII-SAFE)
+      # ============================================================
+      - name: Publish Connection Details
+        shell: powershell
+        run: |
+          $summaryFile = $env:GITHUB_STEP_SUMMARY
+          
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (NetBird RDP)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Connection Details:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Public Domain (Port is required):** ``pc.layer7pc.bbroot.com:<YOUR_PORT>``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Debug Info (Internal NetBird IP):" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **NetBird IP:** ``$env:NB_IP``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Go to NetBird Dashboard -> Reverse Proxy -> Services." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Look for the service ending in ``pc.layer7pc.bbroot.com``. Note the **Listen Port** (e.g., 18623)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "3. Open **Remote Desktop Connection** (mstsc)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "4. Enter ``pc.layer7pc.bbroot.com:<PORT>`` in the 'Computer' field." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "5. Enter the Username and Password above when prompted." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "> **WARNING:** Make sure you have configured **Access Control Rules** in NetBird to allow your public IP, otherwise the connection will be blocked." -Encoding utf8
+
+      # ============================================================
+      # STEP 6: KEEP SESSION ALIVE (Main Loop)
+      # ============================================================
       - name: Keep session alive
         shell: powershell
         run: |
