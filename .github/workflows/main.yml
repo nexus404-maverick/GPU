@@ -31,19 +31,31 @@ jobs:
           RPASS_INPUT: ${{ github.event.inputs.customPassword }}
         run: |
           Write-Host "Setting up RDP account..."
+          
+          # Tạo mật khẩu phức tạp đảm bảo đủ 4 loại ký tự
           if ([string]::IsNullOrEmpty($env:RPASS_INPUT)) {
-              $chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$"
-              $RPASS = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-          } else { $RPASS = $env:RPASS_INPUT }
+              $upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+              $lower = "abcdefghijkmnopqrstuvwxyz"
+              $digits = "23456789"
+              $special = "!@#$%^&*"
+              
+              $pass = -join (1..4 | ForEach-Object { $special[(Get-Random -Maximum $special.Length)] })
+              $pass += -join (1..4 | ForEach-Object { $upper[(Get-Random -Maximum $upper.Length)] })
+              $pass += -join (1..2 | ForEach-Object { $digits[(Get-Random -Maximum $digits.Length)] })
+              $pass += -join (1..2 | ForEach-Object { $lower[(Get-Random -Maximum $lower.Length)] })
+              
+              $RPASS = -join ($pass.ToCharArray() | Get-Random -Count $pass.Length)
+          } else {
+              $RPASS = $env:RPASS_INPUT
+          }
           
-          $SecurePass = ConvertTo-SecureString $RPASS -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $env:RUSER -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $env:RUSER -Password $SecurePass -FullName "ThyoCloud User" -PasswordNeverExpires
-          } else { Set-LocalUser -Name $env:RUSER -Password $SecurePass }
-          
-          Add-LocalGroupMember -Group "Administrators" -Member $env:RUSER -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RUSER -ErrorAction SilentlyContinue
+          # Sử dụng net user để tạo tài khoản, tránh lỗi complexity
+          net user $env:RUSER $RPASS /add
+          net localgroup "Administrators" $env:RUSER /add
+          net localgroup "Remote Desktop Users" $env:RUSER /add
+          Set-LocalUser -Name $env:RUSER -PasswordNeverExpires $true
 
+          # Cấu hình RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
