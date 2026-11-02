@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (Serveo Random Port RDP)
+name: ThyoCloud Workspace (Bore RDP + Wallpaper + Keep-Alive)
 
 on:
   workflow_dispatch:
@@ -21,6 +21,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # STEP 1: CREATE USER AND ENABLE RDP
+      # ============================================================
       - name: Setup User & Enable RDP
         shell: powershell
         env:
@@ -48,14 +51,16 @@ jobs:
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
           Write-Host "RDP configuration completed."
 
+      # ============================================================
+      # STEP 2: SET WALLPAPER (Áp dụng cho cả User RDP mới)
+      # ============================================================
       - name: Set Wallpaper
         shell: powershell
         run: |
           Write-Host "Setting up wallpaper..."
           $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
           if (-not (Test-Path $LocalWallpaper)) { 
-              Write-Host "[WARNING] Wallpaper not found. Skipping."
-              exit 0 
+              Write-Host "[WARNING] Wallpaper not found. Skipping."; exit 0 
           }
           
           $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
@@ -74,9 +79,7 @@ jobs:
               Set-ItemProperty -Path $DefaultRegPath -Name TileWallpaper -Value "0"
               reg unload "HKU\DefaultUser" | Out-Null
               Write-Host "Default user wallpaper updated."
-          } catch {
-              Write-Host "[WARNING] Could not update default user wallpaper: $_"
-          }
+          } catch { Write-Host "[WARNING] Could not update default user wallpaper: $_" }
           
           Add-Type -TypeDefinition @"
           using System;
@@ -89,6 +92,9 @@ jobs:
           [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
           Write-Host "[SUCCESS] Wallpaper changed!"
 
+      # ============================================================
+      # STEP 3: BACKGROUND TCP PROBE (Lớp Keep-Alive 1: Gửi 1 byte/giây)
+      # ============================================================
       - name: Start TCP Probe Background Job
         shell: powershell
         run: |
@@ -99,8 +105,7 @@ jobs:
                       $client = New-Object System.Net.Sockets.TcpClient
                       $client.Connect("127.0.0.1", 3389)
                       $stream = $client.GetStream()
-                      $byte = [byte[]]@(0)
-                      $stream.Write($byte, 0, 1)
+                      $stream.Write([byte[]]@(0), 0, 1)
                       $stream.Flush()
                       $client.Close()
                   } catch {}
@@ -110,80 +115,82 @@ jobs:
           Write-Host "TCP Probe Job started (ID: $($probeJob.Id))."
           "PROBE_JOB_ID=$($probeJob.Id)" >> $env:GITHUB_ENV
 
-      - name: Start Serveo Tunnel for RDP (Random Port)
+      # ============================================================
+      # STEP 4: START BORE TUNNEL + AUTO-RESTART (Lớp Keep-Alive 2)
+      # ============================================================
+      - name: Start Bore Tunnel for RDP
         shell: powershell
         run: |
-          Write-Host "Starting Serveo tunnel for RDP (requesting random port)..."
+          Write-Host "Downloading Bore (Windows binary)..."
+          $boreZip = "$env:RUNNER_TEMP\bore.zip"
+          $boreExe = "$env:RUNNER_TEMP\bore.exe"
           
-          if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-              Write-Host "Installing OpenSSH Client..."
-              Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 | Out-Null
-          }
-
-          $logFile = "$env:RUNNER_TEMP\serveo.log"
-          $maxRetries = 3
-          $serveoAddress = $null
+          # Tải bản bore mới nhất cho Windows từ GitHub Releases
+          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip" -OutFile $boreZip
+          Expand-Archive -Path $boreZip -DestinationPath "$env:RUNNER_TEMP\bore" -Force
+          # File thực thi sau khi giải nén thường nằm trong thư mục bore
+          $borePath = (Get-ChildItem -Path "$env:RUNNER_TEMP\bore" -Filter "bore*.exe" -Recurse | Select-Object -First 1).FullName
+          if (-not $borePath) { throw "Bore executable not found after extraction." }
           
-          for ($retry = 1; $retry -le $maxRetries -and -not $serveoAddress; $retry++) {
-              Write-Host "Attempt $retry of $maxRetries..."
-              Remove-Item $logFile -ErrorAction SilentlyContinue
-              
-              # SỬ DỤNG CỔNG 0 ĐỂ SERVEO CẤP CỔNG NGẪU NHIÊN
-              $sshArgs = @(
-                  "-o", "StrictHostKeyChecking=no",
-                  "-o", "UserKnownHostsFile=NUL",
-                  "-o", "ServerAliveInterval=1",
-                  "-o", "ServerAliveCountMax=3",
-                  "-o", "ExitOnForwardFailure=yes",
-                  "-R", "0:localhost:3389",
-                  "serveo.net"
-              )
-              
-              Start-Process -FilePath "ssh" -ArgumentList $sshArgs -RedirectStandardOutput $logFile -RedirectStandardError "$env:RUNNER_TEMP\serveo.err" -WindowStyle Hidden
-              
-              Start-Sleep -Seconds 10
-              
-              $attempts = 0
-              while (-not $serveoAddress -and $attempts -lt 15) {
-                  Start-Sleep -Seconds 2
-                  if (Test-Path $logFile) {
-                      $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-                      # Serveo trả về định dạng: Forwarding TCP connections from serveo.net:PORT
-                      if ($content -match 'serveo\.net:(\d+)') {
-                          $serveoPort = $matches[1]
-                          $serveoAddress = "serveo.net:$serveoPort"
-                      }
-                  }
-                  $attempts++
+          Write-Host "Bore executable: $borePath"
+          
+          $logFile = "$env:RUNNER_TEMP\bore.log"
+          $boreAddress = $null
+          
+          # Vòng lặp giám sát: nếu Bore chết, tự khởi động lại
+          Write-Host "Starting Bore tunnel monitor..."
+          $boreJob = Start-Job -ScriptBlock {
+              param($boreExe, $logFile)
+              while ($true) {
+                  $proc = Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err" -PassThru -WindowStyle Hidden
+                  Write-Host "[Bore Monitor] Started Bore (PID: $($proc.Id))"
+                  
+                  # Chờ cho đến khi tiến trình Bore thoát
+                  $proc.WaitForExit()
+                  Write-Host "[Bore Monitor] Bore exited with code $($proc.ExitCode). Restarting in 3 seconds..."
+                  Start-Sleep -Seconds 3
               }
-              
-              if (-not $serveoAddress) {
-                  Write-Host "[WARNING] Attempt $retry failed. Retrying..."
-                  if (Test-Path "$env:RUNNER_TEMP\serveo.err") { 
-                      Get-Content "$env:RUNNER_TEMP\serveo.err" -Tail 5 | Write-Host 
+          } -ArgumentList $borePath, $logFile
+          
+          Write-Host "Bore monitor job started (ID: $($boreJob.Id))."
+          
+          Write-Host "Waiting for Bore to assign a public port..."
+          $attempts = 0
+          while (-not $boreAddress -and $attempts -lt 30) {
+              Start-Sleep -Seconds 2
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+                  # Bore in ra dòng: "listening at bore.pub:PORT"
+                  if ($content -match 'bore\.pub:(\d+)') {
+                      $borePort = $matches[1]
+                      $boreAddress = "bore.pub:$borePort"
                   }
-                  Start-Sleep -Seconds 5
               }
+              $attempts++
           }
           
-          if ($serveoAddress) {
+          if ($boreAddress) {
               Write-Host "======================================================="
-              Write-Host "SERVEO PUBLIC ADDRESS: $serveoAddress"
+              Write-Host "BORE PUBLIC ADDRESS: $boreAddress"
               Write-Host "======================================================="
-              "SERVEO_ADDR=$serveoAddress" >> $env:GITHUB_ENV
+              "BORE_ADDR=$boreAddress" >> $env:GITHUB_ENV
           } else {
-              Write-Host "[ERROR] Could not establish Serveo tunnel after $maxRetries attempts."
-              throw "Failed to establish Serveo tunnel."
+              Write-Host "[ERROR] Could not detect Bore address after $attempts attempts."
+              if (Test-Path "$logFile") { Get-Content "$logFile" -Tail 20 | Write-Host }
+              throw "Failed to establish Bore tunnel."
           }
 
+      # ============================================================
+      # STEP 5: PUBLISH CONNECTION DETAILS
+      # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summary = @()
-          $summary += "## ThyoCloud Workspace (Serveo Random Port RDP)"
+          $summary += "## ThyoCloud Workspace (Bore RDP + Keep-Alive)"
           $summary += ""
           $summary += "### 🔗 Public Address:"
-          $summary += "- **``$env:SERVEO_ADDR``**"
+          $summary += "- **``$env:BORE_ADDR``**"
           $summary += ""
           $summary += "### 🔑 Credentials:"
           $summary += "- **Username:** ``$env:RDP_USER``"
@@ -194,14 +201,17 @@ jobs:
           $summary += "2. Enter the Public Address above in the 'Computer' field."
           $summary += "3. Enter the Username and Password when prompted."
           $summary += ""
-          $summary += "> **Note:** Serveo assigns a random port instead of 3389. Wallpaper & Keep-Alive are active."
+          $summary += "> **Keep-Alive Active:** TCP probe (1 byte/sec) + automatic Bore restart monitor."
           
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
+      # ============================================================
+      # STEP 6: KEEP SESSION ALIVE (Main Loop)
+      # ============================================================
       - name: Keep session alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Serveo Tunnel & TCP Probe running..."
+              Write-Host "[$(Get-Date)] Session Active - Bore Tunnel & TCP Probe running..."
               Start-Sleep -Seconds 300
           }
