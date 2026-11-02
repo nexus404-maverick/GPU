@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (Bore RDP + Wallpaper + Keep-Alive)
+name: ThyoCloud Workspace (Cloudflare RDP)
 
 on:
   workflow_dispatch:
@@ -53,7 +53,7 @@ jobs:
           Write-Host "RDP configuration completed."
 
       # ============================================================
-      # STEP 2: SET WALLPAPER (Applies to Current and Default User)
+      # STEP 2: SET WALLPAPER
       # ============================================================
       - name: Set Wallpaper
         shell: powershell
@@ -67,13 +67,11 @@ jobs:
           $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
           Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
           
-          # Set for current user
           $RegPath = "HKCU:\Control Panel\Desktop"
           Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
           Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
           Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
           
-          # Set for Default user (so new RDP users get it too)
           try {
               reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
               $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
@@ -83,7 +81,6 @@ jobs:
               reg unload "HKU\DefaultUser" | Out-Null
           } catch { Write-Host "[WARNING] Could not update default user wallpaper." }
           
-          # Apply immediately
           Add-Type -TypeDefinition @"
           using System;
           using System.Runtime.InteropServices;
@@ -96,12 +93,12 @@ jobs:
           Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 3: BACKGROUND TCP PROBE (Keep-Alive Layer 1)
+      # STEP 3: BACKGROUND TCP PROBE (Giữ kết nối không bị ngắt)
       # ============================================================
       - name: Start TCP Probe Background Job
         shell: powershell
         run: |
-          Write-Host "Starting TCP probe (1 byte/sec) to keep tunnel active..."
+          Write-Host "Starting TCP probe (1 byte/sec)..."
           $probeJob = Start-Job -ScriptBlock {
               while ($true) {
                   try {
@@ -119,90 +116,47 @@ jobs:
           "PROBE_JOB_ID=$($probeJob.Id)" >> $env:GITHUB_ENV
 
       # ============================================================
-      # STEP 4: START BORE TUNNEL + AUTO-RESTART (Keep-Alive Layer 2)
+      # STEP 4: START CLOUDFLARE TUNNEL
       # ============================================================
-      - name: Start Bore Tunnel for RDP
+      - name: Start Cloudflare Tunnel
         shell: powershell
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
-          Write-Host "Downloading Bore (Windows binary)..."
-          $boreZip = "$env:RUNNER_TEMP\bore.zip"
+          Write-Host "Downloading cloudflared..."
+          $cfExe = "$env:RUNNER_TEMP\cloudflared.exe"
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cfExe
           
-          # Updated download URL for v0.6.0
-          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip" -OutFile $boreZip
-          Expand-Archive -Path $boreZip -DestinationPath "$env:RUNNER_TEMP\bore" -Force
+          Write-Host "Starting Cloudflare Tunnel..."
+          $cfProcess = Start-Process -FilePath $cfExe -ArgumentList "tunnel --no-autoupdate run --token $env:CF_TOKEN" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\cf.log" -RedirectStandardError "$env:RUNNER_TEMP\cf.err"
           
-          $borePath = (Get-ChildItem -Path "$env:RUNNER_TEMP\bore" -Filter "bore*.exe" -Recurse | Select-Object -First 1).FullName
-          if (-not $borePath) { throw "Bore executable not found after extraction." }
-          
-          Write-Host "Bore executable found: $borePath"
-          
-          $logFile = "$env:RUNNER_TEMP\bore.log"
-          $boreAddress = $null
-          
-          # Monitor loop: Restart Bore if it dies
-          Write-Host "Starting Bore tunnel monitor..."
-          $boreJob = Start-Job -ScriptBlock {
-              param($boreExe, $logFile)
-              while ($true) {
-                  $proc = Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err" -PassThru -WindowStyle Hidden
-                  Write-Host "[Bore Monitor] Started Bore (PID: $($proc.Id))"
-                  
-                  # Wait for process to exit
-                  $proc.WaitForExit()
-                  Write-Host "[Bore Monitor] Bore exited. Restarting in 3 seconds..."
-                  Start-Sleep -Seconds 3
-              }
-          } -ArgumentList $borePath, $logFile
-          
-          Write-Host "Bore monitor job started (ID: $($boreJob.Id))."
-          
-          Write-Host "Waiting for Bore to assign a public port..."
-          $attempts = 0
-          while (-not $boreAddress -and $attempts -lt 30) {
-              Start-Sleep -Seconds 2
-              if (Test-Path $logFile) {
-                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-                  if ($content -match 'bore\.pub:(\d+)') {
-                      $borePort = $matches[1]
-                      $boreAddress = "bore.pub:$borePort"
-                  }
-              }
-              $attempts++
-          }
-          
-          if ($boreAddress) {
-              Write-Host "======================================================="
-              Write-Host "BORE PUBLIC ADDRESS: $boreAddress"
-              Write-Host "======================================================="
-              "BORE_ADDR=$boreAddress" >> $env:GITHUB_ENV
-          } else {
-              Write-Host "[ERROR] Could not detect Bore address after $attempts attempts."
-              throw "Failed to establish Bore tunnel."
-          }
+          Write-Host "Cloudflare Tunnel started (PID: $($cfProcess.Id)). Waiting 10 seconds..."
+          Start-Sleep -Seconds 10
+          Write-Host "Tunnel is running in the background."
 
       # ============================================================
-      # STEP 5: PUBLISH CONNECTION DETAILS (ASCII-SAFE VERSION)
+      # STEP 5: PUBLISH CONNECTION DETAILS (ASCII-SAFE)
       # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Bore RDP + Keep-Alive)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Cloudflare RDP)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### Public Address:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **``$env:BORE_ADDR``**" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Public Domain:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Domain:** ``hiepdz.de5.net`` (Make sure this matches your Cloudflare Public Hostname)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Credentials:" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "1. Open **Remote Desktop Connection** (mstsc)." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. Enter the Public Address above in the 'Computer' field." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "3. Enter the Username and Password when prompted." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "> **Keep-Alive Active:** TCP probe (1 byte/sec) + automatic Bore restart monitor." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Open CMD/PowerShell and run this command (keep it open):" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "   ``cloudflared access rdp --hostname hiepdz.de5.net --url rdp://localhost:13389``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Open Remote Desktop Connection (mstsc)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "3. In the Computer field, enter: ``localhost:13389``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "4. Enter the Username and Password above." -Encoding utf8
 
       # ============================================================
       # STEP 6: KEEP SESSION ALIVE (Main Loop)
@@ -211,6 +165,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Bore Tunnel & TCP Probe running..."
+              Write-Host "[$(Get-Date)] Session Active - Cloudflare Tunnel & TCP Probe running..."
               Start-Sleep -Seconds 300
           }
