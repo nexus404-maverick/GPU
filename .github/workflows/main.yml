@@ -126,7 +126,7 @@ jobs:
           $boreExe = "$env:RUNNER_TEMP\bore.exe"
           
           # Tải bản bore mới nhất cho Windows từ GitHub Releases
-          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip" -OutFile $boreZip
+          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip" -OutFile $boreZip
           Expand-Archive -Path $boreZip -DestinationPath "$env:RUNNER_TEMP\bore" -Force
           # File thực thi sau khi giải nén thường nằm trong thư mục bore
           $borePath = (Get-ChildItem -Path "$env:RUNNER_TEMP\bore" -Filter "bore*.exe" -Recurse | Select-Object -First 1).FullName
