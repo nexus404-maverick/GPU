@@ -1,360 +1,166 @@
-
-name: PC criado pelo @alves7.pcm
+name: ThyoCloud Personal Workspace (Fast)
 
 on:
   workflow_dispatch:
     inputs:
-      instance_number:
-        description: 'Instance Number (1-10)'
-        required: true
-        default: '1'
-        type: string
-
-permissions:
-  contents: read
+      customUsername:
+        description: 'Username Akses (Opsional - Default: Admin)'
+        required: false
+        default: 'Admin'
 
 jobs:
-  deploy-rdp:
-    runs-on: windows-latest
+  deploy-workspace:
+    # ÉP BUỘC CHẠY TRÊN WINDOWS 2022 THEO YÊU CẦU
+    runs-on: windows-2022 
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Repository (Lấy file cấu trúc/hình nền)
         uses: actions/checkout@v4
 
-      - name: System Information
-        shell: powershell
-        run: |
-          Write-Host "=== RDP DEPLOYMENT ===" -ForegroundColor Green
-          Write-Host "Instance Number: ${{ inputs.instance_number }}" -ForegroundColor Yellow
-          Write-Host "Runner: $env:RUNNER_NAME" -ForegroundColor Yellow
-          Write-Host "Workflow: $env:GITHUB_WORKFLOW" -ForegroundColor Yellow
-
-          Write-Host "`n=== SYSTEM SPECIFICATIONS ===" -ForegroundColor Cyan
-          Get-ComputerInfo |
-            Select-Object WindowsProductName, WindowsVersion,
-              @{Name='RAM_GB';Expression={[math]::Round($_.TotalPhysicalMemory / 1GB, 2)}}
-
-          Get-CimInstance Win32_Processor |
-            Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
-
-      - name: Enable RDP
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host "Enabling Remote Desktop..." -ForegroundColor Green
-
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name 'fDenyTSConnections' `
-            -Value 0
-
-          # Keep Network Level Authentication enabled.
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'UserAuthentication' `
-            -Value 1
-
-          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
-
-          Write-Host "RDP enabled." -ForegroundColor Green
-
-      - name: Create User Account
-        shell: powershell
+      - name: Menghubungkan ke ThyoCloud Service
+        id: thyo_api
         env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-            throw 'Missing repository secret: RDP_PASSWORD'
-          }
-
-          $securePassword = ConvertTo-SecureString `
-            $env:RDP_PASSWORD -AsPlainText -Force
-
-          $user = Get-LocalUser -Name 'runneradmin' -ErrorAction SilentlyContinue
-
-          if (-not $user) {
-            throw 'The runneradmin account does not exist on this runner.'
-          }
-
-          Set-LocalUser -Name 'runneradmin' -Password $securePassword
-
-          $group = Get-LocalGroup -SID 'S-1-5-32-555'
-          $member = Get-LocalGroupMember -Group $group.Name |
-            Where-Object { $_.Name -match '\\runneradmin$' }
-
-          if (-not $member) {
-            Add-LocalGroupMember -Group $group.Name -Member 'runneradmin'
-          }
-
-          Write-Host 'RDP account configured.' -ForegroundColor Green
-          Write-Host 'Username: runneradmin'
-          Write-Host 'Password: stored in GitHub Secrets'
-
-      - name: Install Tailscale
+          USER: ${{ github.event.inputs.customUsername || 'Admin' }}
+          REPO: ${{ github.event.repository.name }}
+          # Cố định OS type để API biết cấp máy 2022
+          OS_TYPE: 'windows-2022' 
+          TIMEOUT_MIN: '360'
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host 'Downloading Tailscale...' -ForegroundColor Green
-
-          $downloadUrl = 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi'
-          $installer = Join-Path $env:TEMP 'tailscale.msi'
-
-          Invoke-WebRequest -Uri $downloadUrl -OutFile $installer
-
-          $install = Start-Process `
-            -FilePath 'msiexec.exe' `
-            -ArgumentList @('/i', "`"$installer`"", '/quiet', '/norestart') `
-            -Wait -PassThru
-
-          Remove-Item $installer -Force -ErrorAction SilentlyContinue
-
-          if ($install.ExitCode -notin @(0, 3010)) {
-            throw "Tailscale installation failed: exit code $($install.ExitCode)"
+          Write-Host "Environment Terpilih: $env:OS_TYPE (Batas Timer: $env:TIMEOUT_MIN Menit)"
+          Write-Host "Verifikasi Akses Fast Mode ke ThyoCloud..."
+          
+          $webUrl = "https://thyo.cloud/api/get-core"
+          
+          $body = @{
+            username       = $env:USER
+            repo           = $env:REPO
+            os             = $env:OS_TYPE
+            timeoutMinutes = [int]$env:TIMEOUT_MIN
+          } | ConvertTo-Json
+          
+          $req = $null
+          try {
+            $req = Invoke-RestMethod -Uri $webUrl -Method Post -Body $body -ContentType "application/json"
+          } catch {
+            Write-Host "[ERROR JARINGAN] Gagal menghubungi API: $($_.Exception.Message)"
+            exit 1
           }
-
-          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
-
-          if (-not (Test-Path $tailscale)) {
-            throw 'Tailscale executable was not found after installation.'
-          }
-
-          Write-Host 'Tailscale installed successfully.' -ForegroundColor Green
-
-      - name: Connect Tailscale
-        shell: powershell
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
-            throw 'Missing repository secret: TAILSCALE_AUTH_KEY'
-          }
-
-          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
-          $hostname = "enigmano-${{ github.run_id }}"
-
-          Write-Host 'Connecting to Tailscale...' -ForegroundColor Green
-
-          & $tailscale up `
-            --authkey="$env:TAILSCALE_AUTH_KEY" `
-            --hostname="$hostname"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Tailscale failed to connect.'
-          }
-
-          Start-Sleep -Seconds 10
-
-          $tsIP = (& $tailscale ip -4 | Select-Object -First 1).Trim()
-
-          if ([string]::IsNullOrWhiteSpace($tsIP)) {
-            throw 'Could not obtain the Tailscale IPv4 address.'
-          }
-
-          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-          Write-Host "Tailscale IP: $tsIP" -ForegroundColor Green
-
-          & $tailscale status
-
-      - name: Install Google Chrome
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host 'Downloading Google Chrome...' -ForegroundColor Green
-
-          $url = 'https://dl.google.com/chrome/install/latest/chrome_installer.exe'
-          $installer = Join-Path $env:TEMP 'chrome_installer.exe'
-
-          Invoke-WebRequest -Uri $url -OutFile $installer
-
-          $process = Start-Process `
-            -FilePath $installer `
-            -ArgumentList '/silent', '/install' `
-            -Wait -PassThru
-
-          Remove-Item $installer -Force -ErrorAction SilentlyContinue
-
-          $chromePaths = @(
-            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
-            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
-          )
-
-          if (-not ($chromePaths | Where-Object { Test-Path $_ })) {
-            Write-Warning 'Chrome executable was not found; check installer output.'
-          } else {
-            Write-Host 'Chrome installed.' -ForegroundColor Green
-          }
-
-      - name: Install 7-Zip
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $url = 'https://www.7-zip.org/a/7z2409-x64.exe'
-          $installer = Join-Path $env:TEMP '7zip-installer.exe'
-
-          Write-Host 'Downloading 7-Zip...' -ForegroundColor Green
-          Invoke-WebRequest -Uri $url -OutFile $installer
-
-          $process = Start-Process `
-            -FilePath $installer `
-            -ArgumentList '/S' `
-            -Wait -PassThru
-
-          Remove-Item $installer -Force -ErrorAction SilentlyContinue
-
-          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
-
-          if (-not (Test-Path $sevenZip)) {
-            throw '7-Zip installation failed or executable is missing.'
-          }
-
-          Write-Host '7-Zip installed successfully.' -ForegroundColor Green
-
-      - name: Install Mesa3D
-        shell: powershell
-        timeout-minutes: 10
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host 'Finding the latest Mesa3D release...' -ForegroundColor Green
-
-          $headers = @{
-            'User-Agent' = 'RDP-Mesa3D-Installer'
-            'Accept' = 'application/vnd.github+json'
-          }
-
-          $release = Invoke-RestMethod `
-            -Uri 'https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest' `
-            -Headers $headers
-
-          $asset = $release.assets |
-            Where-Object {
-              $_.name -match '^mesa3d-.*-release-msvc\.7z$'
-            } |
-            Select-Object -First 1
-
-          if (-not $asset) {
-            throw 'No matching Mesa3D MSVC archive was found in the latest release.'
-          }
-
-          $archive = Join-Path $env:TEMP 'mesa3d.7z'
-          $extractDir = Join-Path $env:TEMP 'mesa3d-extracted'
-          $installDir = 'C:\Layer7\Mesa3D'
-          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
-
-          Write-Host "Mesa3D archive: $($asset.name)"
-          Invoke-WebRequest `
-            -Uri $asset.browser_download_url `
-            -OutFile $archive `
-            -Headers @{ 'User-Agent' = 'RDP-Mesa3D-Installer' }
-
-          New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
-          New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-
-          & $sevenZip x $archive "-o$extractDir" -y
-
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Mesa3D archive extraction failed.'
-          }
-
-          # Find the 64-bit OpenGL implementation in the extracted package.
-          $glDll = Get-ChildItem `
-            -Path $extractDir `
-            -Filter 'opengl32.dll' `
-            -File -Recurse |
-            Where-Object {
-              $_.FullName -match '[\\/]x64[\\/]'
-            } |
-            Select-Object -First 1
-
-          if (-not $glDll) {
-            throw 'Could not find a 64-bit opengl32.dll in the Mesa3D archive.'
-          }
-
-          $mesaSource = $glDll.Directory.FullName
-
-          Write-Host "Copying Mesa files from: $mesaSource"
-
-          Copy-Item `
-            -Path (Join-Path $mesaSource '*') `
-            -Destination $installDir `
-            -Recurse -Force
-
-          if (-not (Test-Path (Join-Path $installDir 'opengl32.dll'))) {
-            throw 'Mesa3D validation failed: opengl32.dll is missing.'
-          }
-
-          # Add the directory to the machine PATH and this job's PATH.
-          $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-
-          if ($machinePath -notlike "*$installDir*") {
-            [Environment]::SetEnvironmentVariable(
-              'Path',
-              "$machinePath;$installDir",
-              'Machine'
-            )
-          }
-
-          "$installDir" >> $env:GITHUB_PATH
-
-          Write-Host 'Mesa3D files installed and validated.' -ForegroundColor Green
-          Write-Host "Mesa3D directory: $installDir"
-
-          Remove-Item $archive -Force -ErrorAction SilentlyContinue
-          Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-
-      - name: Connection Details
-        shell: powershell
-        run: |
-          Write-Host ''
-          Write-Host '=== RDP CONNECTION DETAILS ===' -ForegroundColor Green
-          Write-Host "Host: $env:TAILSCALE_IP" -ForegroundColor Cyan
-          Write-Host 'Username: runneradmin' -ForegroundColor Cyan
-          Write-Host 'Password: use the value saved in GitHub Secret RDP_PASSWORD' -ForegroundColor Yellow
-
-          Write-Host ''
-          Write-Host 'Connection instructions:' -ForegroundColor Yellow
-          Write-Host '1. Install Tailscale on the device you will connect from.'
-          Write-Host '2. Sign in to the same tailnet.'
-          Write-Host '3. Open a Remote Desktop client.'
-          Write-Host "4. Connect to $env:TAILSCALE_IP"
-          Write-Host '5. Enter username runneradmin and your RDP_PASSWORD secret.'
-
-      - name: Keep Session Alive
-        shell: powershell
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          $ErrorActionPreference = 'Continue'
-
-          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
-          $counter = 0
-
-          Write-Host 'RDP workflow is running.' -ForegroundColor Green
-          Write-Host 'The GitHub-hosted runner has a finite job lifetime.' -ForegroundColor Yellow
-
-          while ($true) {
-            $counter++
-            Write-Host "Heartbeat #$counter - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-
-            & $tailscale status
-
-            if ($LASTEXITCODE -ne 0) {
-              Write-Warning 'Tailscale status failed; attempting to reconnect.'
-
-              & $tailscale up `
-                --authkey="$env:TAILSCALE_AUTH_KEY" `
-                --hostname="enigmano-${{ github.run_id }}"
+          
+          if ($req.success -eq $true) {
+            Write-Host "[OK] Akses Diterima! Menyiapkan Workspace..."
+            
+            # --- BÓC TÁCH THÔNG TIN TỪ API ---
+            # LƯU Ý: Sửa lại tên key ($req.ip, $req.username...) nếu API thực tế trả về tên khác
+            $targetIp = $req.ip
+            $targetUser = $req.username
+            $targetPass = $req.password
+            
+            if (-not $targetIp -or -not $targetUser -or -not $targetPass) {
+                Write-Host "[ERROR] API không trả về đủ thông tin (IP, User, Pass)."
+                exit 1
             }
 
-            Start-Sleep -Seconds 60
+            Write-Host "Target IP: $targetIp"
+            Write-Host "Target User: $targetUser"
+            
+            # Lưu vào GITHUB_ENV để các bước sau sử dụng
+            "TARGET_IP=$targetIp" >> $env:GITHUB_ENV
+            "TARGET_USER=$targetUser" >> $env:GITHUB_ENV
+            "TARGET_PASS=$targetPass" >> $env:GITHUB_ENV
+            
+            # Thực thi script core nếu API có trả về
+            if ($req.script) {
+                Invoke-Expression $req.script
+            }
+            
+          } else {
+            Write-Host "[GAGAL] $($req.message)"
+            exit 1
+          }
+
+      # ============================================================
+      # BƯỚC 2: ĐĂNG NHẬP TỰ ĐỘNG VÀ ĐỔI HÌNH NỀN
+      # ============================================================
+      - name: Login to Remote & Change Wallpaper
+        shell: powershell
+        env:
+          IP: ${{ env.TARGET_IP }}
+          RUSER: ${{ env.TARGET_USER }}
+          RPASS: ${{ env.TARGET_PASS }}
+        run: |
+          Write-Host "Đang kết nối tới $env:IP để đổi hình nền..."
+          
+          # 1. Tạo SecureString cho mật khẩu
+          $SecurePassword = ConvertTo-SecureString $env:RPASS -AsPlainText -Force
+          $Credential = New-Object System.Management.Automation.PSCredential ($env:RUSER, $SecurePassword)
+          
+          # 2. ĐƯỜNG DẪN FILE HÌNH NỀN (Trỏ đúng vào thư mục Wallpaper trong repo)
+          $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
+          
+          if (-not (Test-Path $LocalWallpaper)) {
+              Write-Host "[WARNING] Không tìm thấy file Wallpaper/wallpaper.png trong repo. Bỏ qua bước đổi hình nền."
+              exit 0
+          }
+
+          # 3. Kết nối Remote PowerShell tới máy ảo đích
+          try {
+              Write-Host "Đang thiết lập kết nối Remote PowerShell..."
+              # Bỏ qua xác thực chứng chỉ (dành cho máy ảo dùng cert tự ký)
+              $session = New-PSSession -ComputerName $env:IP -Credential $Credential -Authentication Basic -UseSSL -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck) -ErrorAction Stop
+              
+              # 4. Tạo thư mục và copy file hình nền sang máy ảo
+              Write-Host "Đang copy hình nền sang máy ảo..."
+              $RemoteWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
+              
+              # Đảm bảo thư mục đích tồn tại trên máy ảo
+              Invoke-Command -Session $session -ScriptBlock { 
+                  New-Item -ItemType Directory -Path "C:\Windows\Web\Wallpaper" -Force | Out-Null 
+              }
+              
+              Copy-Item -Path $LocalWallpaper -Destination $RemoteWallpaper -ToSession $session -Force
+              
+              # 5. Thay đổi Registry trên máy ảo để set wallpaper
+              Write-Host "Đang thay đổi hình nền..."
+              Invoke-Command -Session $session -ScriptBlock {
+                  $WallpaperPath = "C:\Windows\Web\Wallpaper\thyo_bg.png"
+                  $RegPath = "HKCU:\Control Panel\Desktop"
+                  
+                  # Thiết lập registry cho hình nền
+                  Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $WallpaperPath
+                  Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10" # 10 = Fill (Lấp đầy màn hình)
+                  Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
+                  
+                  # Sử dụng API Windows để refresh hình nền ngay lập tức
+                  Add-Type -TypeDefinition @"
+                  using System;
+                  using System.Runtime.InteropServices;
+                  public class Wallpaper {
+                      [DllImport("user32.dll", CharSet = CharSet.Auto)]
+                      public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+                  }
+                  "@
+                  [Wallpaper]::SystemParametersInfo(20, 0, $WallpaperPath, 0x01 -bor 0x02)
+              }
+              
+              Write-Host "[SUCCESS] Đã đổi hình nền thành công!"
+              
+              # Đóng session
+              Remove-PSSession -Session $session
+              
+          } catch {
+              Write-Host "[ERROR] Không thể kết nối hoặc đổi hình nền: $($_.Exception.Message)"
+              # Không exit 1 để workflow vẫn chạy tiếp (giữ session)
+          }
+
+      # ============================================================
+      # BƯỚC 3: GIỮ SESSION
+      # ============================================================
+      - name: Keep session alive
+        shell: powershell
+        run: |
+          while ($true) {
+              Write-Host "[$(Get-Date)] Session Active..."
+              Start-Sleep -Seconds 300
           }
