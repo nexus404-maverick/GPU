@@ -21,9 +21,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ============================================================
-      # STEP 1: CREATE USER AND ENABLE RDP
-      # ============================================================
       - name: Setup User & Enable RDP
         shell: powershell
         env:
@@ -31,31 +28,23 @@ jobs:
           RPASS_INPUT: ${{ github.event.inputs.customPassword }}
         run: |
           Write-Host "Setting up RDP account..."
-          
-          # Tạo mật khẩu phức tạp đảm bảo đủ 4 loại ký tự
           if ([string]::IsNullOrEmpty($env:RPASS_INPUT)) {
               $upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
               $lower = "abcdefghijkmnopqrstuvwxyz"
               $digits = "23456789"
               $special = "!@#$%^&*"
-              
               $pass = -join (1..4 | ForEach-Object { $special[(Get-Random -Maximum $special.Length)] })
               $pass += -join (1..4 | ForEach-Object { $upper[(Get-Random -Maximum $upper.Length)] })
               $pass += -join (1..2 | ForEach-Object { $digits[(Get-Random -Maximum $digits.Length)] })
               $pass += -join (1..2 | ForEach-Object { $lower[(Get-Random -Maximum $lower.Length)] })
-              
               $RPASS = -join ($pass.ToCharArray() | Get-Random -Count $pass.Length)
-          } else {
-              $RPASS = $env:RPASS_INPUT
-          }
+          } else { $RPASS = $env:RPASS_INPUT }
           
-          # Sử dụng net user để tạo tài khoản, tránh lỗi complexity
           net user $env:RUSER $RPASS /add
           net localgroup "Administrators" $env:RUSER /add
           net localgroup "Remote Desktop Users" $env:RUSER /add
           Set-LocalUser -Name $env:RUSER -PasswordNeverExpires $true
 
-          # Cấu hình RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
@@ -64,17 +53,12 @@ jobs:
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
           Write-Host "RDP configuration completed."
 
-      # ============================================================
-      # STEP 2: SET WALLPAPER
-      # ============================================================
       - name: Set Wallpaper
         shell: powershell
         run: |
           Write-Host "Setting up wallpaper..."
           $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
-          if (-not (Test-Path $LocalWallpaper)) { 
-              Write-Host "[WARNING] Wallpaper not found. Skipping."; exit 0 
-          }
+          if (-not (Test-Path $LocalWallpaper)) { Write-Host "[WARNING] Wallpaper not found. Skipping."; exit 0 }
           
           $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
           Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
@@ -104,26 +88,24 @@ jobs:
           [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
           Write-Host "[SUCCESS] Wallpaper changed!"
 
-      # ============================================================
-      # STEP 3: INSTALL AND CONNECT NETBIRD (CURL FIX)
-      # ============================================================
       - name: Install and Connect NetBird
         shell: powershell
         env:
           NB_SETUP_KEY: ${{ secrets.NETBIRD_SETUP_KEY }}
         run: |
-          Write-Host "Downloading NetBird via curl (more stable)..."
-          $installerPath = "$env:RUNNER_TEMP\netbird_installer.exe"
+          Write-Host "Downloading NetBird MSI installer from official package repository..."
+          $msiPath = "$env:RUNNER_TEMP\netbird_installer.msi"
           
-          # Sử dụng curl.exe với các tùy chọn tự động thử lại khi gặp sự cố mạng
-          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $installerPath "https://github.com/netbirdio/netbird/releases/latest/download/netbird_installer.exe"
+          # Sử dụng kho lưu trữ chính thức của NetBird, tên file cố định
+          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $msiPath "https://pkgs.netbird.io/windows/msi/x64/netbird_installer_windows_amd64.msi"
           
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $installerPath)) {
-              throw "Failed to download NetBird installer after multiple retries."
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $msiPath)) {
+              throw "Failed to download NetBird MSI installer."
           }
           
-          Write-Host "Installing NetBird silently..."
-          Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+          Write-Host "Installing NetBird silently via MSI..."
+          # Cài đặt silent, không khởi động lại máy
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait
           
           Write-Host "Waiting for NetBird service to start..."
           Start-Sleep -Seconds 15
@@ -145,9 +127,6 @@ jobs:
           "NB_IP=$nbIP" >> $env:GITHUB_ENV
           Write-Host "NetBird IP: $nbIP"
 
-      # ============================================================
-      # STEP 4: BACKGROUND TCP PROBE (Keep-Alive)
-      # ============================================================
       - name: Start TCP Probe Background Job
         shell: powershell
         run: |
@@ -168,9 +147,6 @@ jobs:
           Write-Host "TCP Probe Job started (ID: $($probeJob.Id))."
           "PROBE_JOB_ID=$($probeJob.Id)" >> $env:GITHUB_ENV
 
-      # ============================================================
-      # STEP 5: PUBLISH CONNECTION DETAILS (ASCII-SAFE)
-      # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
@@ -195,9 +171,6 @@ jobs:
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "> **WARNING:** Make sure you have configured **Access Control Rules** in NetBird to allow your public IP, otherwise the connection will be blocked." -Encoding utf8
 
-      # ============================================================
-      # STEP 6: KEEP SESSION ALIVE (Main Loop)
-      # ============================================================
       - name: Keep session alive
         shell: powershell
         run: |
