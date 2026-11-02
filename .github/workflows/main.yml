@@ -105,33 +105,45 @@ jobs:
           Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 3: INSTALL AND CONNECT NETBIRD
+      # STEP 3: INSTALL AND CONNECT NETBIRD (CURL FIX)
       # ============================================================
       - name: Install and Connect NetBird
         shell: powershell
         env:
           NB_SETUP_KEY: ${{ secrets.NETBIRD_SETUP_KEY }}
         run: |
-          Write-Host "Downloading NetBird..."
-          Invoke-WebRequest -Uri "https://github.com/netbirdio/netbird/releases/latest/download/netbird_installer.exe" -OutFile "netbird_installer.exe"
+          Write-Host "Downloading NetBird via curl (more stable)..."
+          $installerPath = "$env:RUNNER_TEMP\netbird_installer.exe"
+          
+          # Sử dụng curl.exe với các tùy chọn tự động thử lại khi gặp sự cố mạng
+          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $installerPath "https://github.com/netbirdio/netbird/releases/latest/download/netbird_installer.exe"
+          
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $installerPath)) {
+              throw "Failed to download NetBird installer after multiple retries."
+          }
           
           Write-Host "Installing NetBird silently..."
-          Start-Process -FilePath ".\netbird_installer.exe" -ArgumentList "/S" -Wait
+          Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
           
-          Write-Host "Connecting to NetBird network..."
+          Write-Host "Waiting for NetBird service to start..."
+          Start-Sleep -Seconds 15
+          
           $nbExe = "C:\Program Files\NetBird\netbird.exe"
+          if (-not (Test-Path $nbExe)) {
+              throw "NetBird executable not found at $nbExe. Installation may have failed."
+          }
           
-          # Kết nối vào mạng NetBird
+          Write-Host "Connecting to NetBird network with setup key..."
           & $nbExe up --setup-key $env:NB_SETUP_KEY
           
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 10
           
           Write-Host "NetBird Status:"
           & $nbExe status
           
-          # Lấy IP nội bộ NetBird để in ra cho bạn dễ nhìn
           $nbIP = (& $nbExe status) | Select-String -Pattern 'NetBird IP: (\d+\.\d+\.\d+\.\d+)' | ForEach-Object { $_.Matches.Groups[1].Value }
           "NB_IP=$nbIP" >> $env:GITHUB_ENV
+          Write-Host "NetBird IP: $nbIP"
 
       # ============================================================
       # STEP 4: BACKGROUND TCP PROBE (Keep-Alive)
