@@ -1,166 +1,155 @@
-name: ThyoCloud Personal Workspace (Fast)
+name: ThyoCloud Personal Workspace (Self-Hosted RDP)
 
 on:
   workflow_dispatch:
     inputs:
       customUsername:
-        description: 'Username Akses (Opsional - Default: Admin)'
+        description: 'Username đăng nhập RDP (Mặc định: Admin)'
         required: false
         default: 'Admin'
+      customPassword:
+        description: 'Mật khẩu RDP (Để trống để tự tạo ngẫu nhiên)'
+        required: false
+        default: ''
 
 jobs:
   deploy-workspace:
-    # ÉP BUỘC CHẠY TRÊN WINDOWS 2022 THEO YÊU CẦU
-    runs-on: windows-2022 
+    runs-on: windows-2022
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Repository (Lấy file cấu trúc/hình nền)
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Menghubungkan ke ThyoCloud Service
-        id: thyo_api
-        env:
-          USER: ${{ github.event.inputs.customUsername || 'Admin' }}
-          REPO: ${{ github.event.repository.name }}
-          # Cố định OS type để API biết cấp máy 2022
-          OS_TYPE: 'windows-2022' 
-          TIMEOUT_MIN: '360'
+      # ============================================================
+      # BƯỚC 1: CẤU HÌNH USER VÀ BẬT RDP NỘI BỘ
+      # ============================================================
+      - name: Setup User & Enable RDP
         shell: powershell
+        env:
+          RUSER: ${{ github.event.inputs.customUsername || 'Admin' }}
+          RPASS_INPUT: ${{ github.event.inputs.customPassword }}
         run: |
-          Write-Host "Environment Terpilih: $env:OS_TYPE (Batas Timer: $env:TIMEOUT_MIN Menit)"
-          Write-Host "Verifikasi Akses Fast Mode ke ThyoCloud..."
+          Write-Host "Đang thiết lập tài khoản RDP..."
           
-          $webUrl = "https://thyo.cloud/api/get-core"
-          
-          $body = @{
-            username       = $env:USER
-            repo           = $env:REPO
-            os             = $env:OS_TYPE
-            timeoutMinutes = [int]$env:TIMEOUT_MIN
-          } | ConvertTo-Json
-          
-          $req = $null
-          try {
-            $req = Invoke-RestMethod -Uri $webUrl -Method Post -Body $body -ContentType "application/json"
-          } catch {
-            Write-Host "[ERROR JARINGAN] Gagal menghubungi API: $($_.Exception.Message)"
-            exit 1
-          }
-          
-          if ($req.success -eq $true) {
-            Write-Host "[OK] Akses Diterima! Menyiapkan Workspace..."
-            
-            # --- BÓC TÁCH THÔNG TIN TỪ API ---
-            # LƯU Ý: Sửa lại tên key ($req.ip, $req.username...) nếu API thực tế trả về tên khác
-            $targetIp = $req.ip
-            $targetUser = $req.username
-            $targetPass = $req.password
-            
-            if (-not $targetIp -or -not $targetUser -or -not $targetPass) {
-                Write-Host "[ERROR] API không trả về đủ thông tin (IP, User, Pass)."
-                exit 1
-            }
-
-            Write-Host "Target IP: $targetIp"
-            Write-Host "Target User: $targetUser"
-            
-            # Lưu vào GITHUB_ENV để các bước sau sử dụng
-            "TARGET_IP=$targetIp" >> $env:GITHUB_ENV
-            "TARGET_USER=$targetUser" >> $env:GITHUB_ENV
-            "TARGET_PASS=$targetPass" >> $env:GITHUB_ENV
-            
-            # Thực thi script core nếu API có trả về
-            if ($req.script) {
-                Invoke-Expression $req.script
-            }
-            
+          # 1. Tạo mật khẩu (Nếu người dùng không nhập, tự tạo ngẫu nhiên)
+          if ([string]::IsNullOrEmpty($env:RPASS_INPUT)) {
+              $chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$"
+              $RPASS = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
           } else {
-            Write-Host "[GAGAL] $($req.message)"
-            exit 1
+              $RPASS = $env:RPASS_INPUT
           }
+          
+          # 2. Tạo User và thêm vào nhóm Administrators, nhóm Remote Desktop Users
+          $SecurePass = ConvertTo-SecureString $RPASS -AsPlainText -Force
+          
+          # Kiểm tra xem user đã tồn tại chưa
+          $userExists = Get-LocalUser -Name $env:RUSER -ErrorAction SilentlyContinue
+          if (-not $userExists) {
+              New-LocalUser -Name $env:RUSER -Password $SecurePass -FullName "ThyoCloud User" -Description "RDP Account" -PasswordNeverExpires
+              Write-Host "Đã tạo user mới: $env:RUSER"
+          } else {
+              Set-LocalUser -Name $env:RUSER -Password $SecurePass
+              Write-Host "Đã cập nhật mật khẩu cho user: $env:RUSER"
+          }
+          
+          Add-LocalGroupMember -Group "Administrators" -Member $env:RUSER -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RUSER -ErrorAction SilentlyContinue
+
+          # 3. Bật RDP và tắt xác thực NLA (để dễ kết nối từ bên ngoài)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          
+          # 4. Mở Firewall cho RDP
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+
+          # 5. Lưu thông tin vào GITHUB_ENV
+          "RDP_USER=$env:RUSER" >> $env:GITHUB_ENV
+          "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
+          
+          Write-Host "Cấu hình RDP hoàn tất."
 
       # ============================================================
-      # BƯỚC 2: ĐĂNG NHẬP TỰ ĐỘNG VÀ ĐỔI HÌNH NỀN
+      # BƯỚC 2: LẤY IP CÔNG KHAI CỦA MÁY ẢO
       # ============================================================
-      - name: Login to Remote & Change Wallpaper
+      - name: Get Public IP
+        id: get_ip
         shell: powershell
-        env:
-          IP: ${{ env.TARGET_IP }}
-          RUSER: ${{ env.TARGET_USER }}
-          RPASS: ${{ env.TARGET_PASS }}
         run: |
-          Write-Host "Đang kết nối tới $env:IP để đổi hình nền..."
+          Write-Host "Đang lấy IP công khai..."
+          $ip = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
+          Write-Host "IP của máy ảo là: $ip"
+          "RDP_IP=$ip" >> $env:GITHUB_ENV
+
+      # ============================================================
+      # BƯỚC 3: ĐỔI HÌNH NỀN TỪ THƯ MỤC WALLPAPER
+      # ============================================================
+      - name: Set Wallpaper
+        shell: powershell
+        run: |
+          Write-Host "Đang thiết lập hình nền..."
           
-          # 1. Tạo SecureString cho mật khẩu
-          $SecurePassword = ConvertTo-SecureString $env:RPASS -AsPlainText -Force
-          $Credential = New-Object System.Management.Automation.PSCredential ($env:RUSER, $SecurePassword)
-          
-          # 2. ĐƯỜNG DẪN FILE HÌNH NỀN (Trỏ đúng vào thư mục Wallpaper trong repo)
+          # Đường dẫn tới file ảnh trong repo
           $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
           
           if (-not (Test-Path $LocalWallpaper)) {
-              Write-Host "[WARNING] Không tìm thấy file Wallpaper/wallpaper.png trong repo. Bỏ qua bước đổi hình nền."
+              Write-Host "[WARNING] Không tìm thấy file Wallpaper/wallpaper.png. Bỏ qua bước đổi hình nền."
               exit 0
           }
 
-          # 3. Kết nối Remote PowerShell tới máy ảo đích
-          try {
-              Write-Host "Đang thiết lập kết nối Remote PowerShell..."
-              # Bỏ qua xác thực chứng chỉ (dành cho máy ảo dùng cert tự ký)
-              $session = New-PSSession -ComputerName $env:IP -Credential $Credential -Authentication Basic -UseSSL -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck) -ErrorAction Stop
-              
-              # 4. Tạo thư mục và copy file hình nền sang máy ảo
-              Write-Host "Đang copy hình nền sang máy ảo..."
-              $RemoteWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
-              
-              # Đảm bảo thư mục đích tồn tại trên máy ảo
-              Invoke-Command -Session $session -ScriptBlock { 
-                  New-Item -ItemType Directory -Path "C:\Windows\Web\Wallpaper" -Force | Out-Null 
-              }
-              
-              Copy-Item -Path $LocalWallpaper -Destination $RemoteWallpaper -ToSession $session -Force
-              
-              # 5. Thay đổi Registry trên máy ảo để set wallpaper
-              Write-Host "Đang thay đổi hình nền..."
-              Invoke-Command -Session $session -ScriptBlock {
-                  $WallpaperPath = "C:\Windows\Web\Wallpaper\thyo_bg.png"
-                  $RegPath = "HKCU:\Control Panel\Desktop"
-                  
-                  # Thiết lập registry cho hình nền
-                  Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $WallpaperPath
-                  Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10" # 10 = Fill (Lấp đầy màn hình)
-                  Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
-                  
-                  # Sử dụng API Windows để refresh hình nền ngay lập tức
-                  Add-Type -TypeDefinition @"
-                  using System;
-                  using System.Runtime.InteropServices;
-                  public class Wallpaper {
-                      [DllImport("user32.dll", CharSet = CharSet.Auto)]
-                      public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
-                  }
-                  "@
-                  [Wallpaper]::SystemParametersInfo(20, 0, $WallpaperPath, 0x01 -bor 0x02)
-              }
-              
-              Write-Host "[SUCCESS] Đã đổi hình nền thành công!"
-              
-              # Đóng session
-              Remove-PSSession -Session $session
-              
-          } catch {
-              Write-Host "[ERROR] Không thể kết nối hoặc đổi hình nền: $($_.Exception.Message)"
-              # Không exit 1 để workflow vẫn chạy tiếp (giữ session)
+          # Copy ảnh vào thư mục hệ thống
+          $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
+          Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
+          
+          # Chạy script đổi hình nền
+          $RegPath = "HKCU:\Control Panel\Desktop"
+          Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
+          Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10" # 10 = Fill
+          Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
+          
+          # Refresh hình nền ngay lập tức
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Wallpaper {
+              [DllImport("user32.dll", CharSet = CharSet.Auto)]
+              public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
           }
+          "@
+          [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
+          
+          Write-Host "[SUCCESS] Đã đổi hình nền thành công!"
 
       # ============================================================
-      # BƯỚC 3: GIỮ SESSION
+      # BƯỚC 4: XUẤT THÔNG TIN KẾT NỐI RA MÀN HÌNH
+      # ============================================================
+      - name: Publish Connection Details
+        shell: powershell
+        run: |
+          $summary = @(
+            '## ThyoCloud Workspace (Self-Hosted RDP)',
+            '',
+            '### Thông tin kết nối:',
+            '- **IP:** `' + $env:RDP_IP + '`',
+            '- **Username:** `' + $env:RDP_USER + '`',
+            '- **Password:** `' + $env:RDP_PASS + '`',
+            '',
+            '**Hướng dẫn kết nối:**',
+            '1. Mở ứng dụng **Remote Desktop Connection** (mstsc) trên máy tính của bạn.',
+            '2. Nhập IP ở trên vào ô "Computer".',
+            '3. Nhập Username và Password khi được hỏi.',
+            '',
+            '> **Lưu ý:** Nếu kết nối bị từ chối, hãy đợi 1-2 phút để máy ảo khởi động hoàn tất dịch vụ RDP.'
+          )
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      # ============================================================
+      # BƯỚC 5: GIỮ SESSION SỐNG (GIỮ MÁY ẢO KHÔNG BỊ TẮT)
       # ============================================================
       - name: Keep session alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for RDP connection..."
               Start-Sleep -Seconds 300
           }
