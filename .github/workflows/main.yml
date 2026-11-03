@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (FRP VPS Tunnel)
+name: ThyoCloud Workspace (Hypertunnel RDP)
 
 on:
   workflow_dispatch:
@@ -70,18 +70,15 @@ jobs:
           $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
           Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
           
-          # Tắt chính sách chặn wallpaper trên RDP
           $tsPolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           New-Item -Path $tsPolicyPath -Force | Out-Null
           Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
           
-          # Set cho user hiện tại
           $RegPath = "HKCU:\Control Panel\Desktop"
           Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
           Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
           Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
           
-          # Set cho Default User
           try {
               reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
               $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
@@ -103,58 +100,56 @@ jobs:
           Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 3: DOWNLOAD AND RUN FRP CLIENT
+      # STEP 3: SETUP AND RUN HYPERTUNNEL (WITH AUTO-RESTART)
       # ============================================================
-      - name: Setup FRP Client Tunnel
+      - name: Start Hypertunnel for RDP
         shell: powershell
-        env:
-          FRP_SERVER_IP: ${{ secrets.FRP_SERVER_IP }}
-          FRP_AUTH_TOKEN: ${{ secrets.FRP_AUTH_TOKEN }}
-          FRP_REMOTE_PORT: ${{ secrets.FRP_REMOTE_PORT }}
         run: |
-          Write-Host "Downloading FRP Client..."
-          $frpZip = "$env:RUNNER_TEMP\frp.zip"
+          Write-Host "Setting up Node.js and Hypertunnel..."
+          # GitHub Actions runner đã có sẵn Node.js, chỉ cần dùng npx
+          # Tạo một background job để tự động khởi động lại nếu tunnel bị ngắt
+          $tunnelJob = Start-Job -ScriptBlock {
+              while ($true) {
+                  Write-Host "[Hypertunnel Monitor] Starting tunnel to localhost:3389..."
+                  $output = npx --yes hypertunnel --port 3389 2>&1
+                  
+                  # Ghi log ra file để dễ debug nếu cần
+                  $output | Out-File -FilePath "$env:RUNNER_TEMP\hypertunnel.log" -Encoding utf8
+                  
+                  # Kiểm tra nếu có lỗi hoặc tunnel bị ngắt, nghỉ 5 giây rồi thử lại
+                  Start-Sleep -Seconds 5
+              }
+          }
+          Write-Host "Tunnel monitor started (Job ID: $($tunnelJob.Id))."
           
-          # Tải FRP v0.61.0 (Bản ổn định)
-          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $frpZip "https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
+          Write-Host "Waiting for Hypertunnel to assign a public address..."
+          $hypertunnelAddress = $null
+          $attempts = 0
           
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $frpZip)) {
-              throw "Failed to download FRP Client."
+          while (-not $hypertunnelAddress -and $attempts -lt 30) {
+              Start-Sleep -Seconds 2
+              if (Test-Path "$env:RUNNER_TEMP\hypertunnel.log") {
+                  $content = Get-Content "$env:RUNNER_TEMP\hypertunnel.log" -Raw -ErrorAction SilentlyContinue
+                  # Tìm địa chỉ dạng hypertunnel.ga:19432 trong output
+                  if ($content -match 'hypertunnel\.ga:(\d+)') {
+                      $hypertunnelAddress = "hypertunnel.ga:$($matches[1])"
+                  }
+              }
+              $attempts++
           }
           
-          Expand-Archive -Path $frpZip -DestinationPath "$env:RUNNER_TEMP\frp" -Force
-          $frpcExe = (Get-ChildItem -Path "$env:RUNNER_TEMP\frp" -Filter "frpc.exe" -Recurse | Select-Object -First 1).FullName
-          if (-not $frpcExe) { throw "FRP Client executable not found." }
-          
-          Write-Host "Creating FRP configuration..."
-          $configContent = @"
-          serverAddr = "$env:FRP_SERVER_IP"
-          serverPort = 7000
-          auth.method = "token"
-          auth.token = "$env:FRP_AUTH_TOKEN"
-          loginFailExit = true
-
-          [[proxies]]
-          name = "github-rdp"
-          type = "tcp"
-          localIP = "127.0.0.1"
-          localPort = 3389
-          remotePort = $env:FRP_REMOTE_PORT
-          "@
-          $configContent | Out-File -FilePath "$env:RUNNER_TEMP\frp\frpc.toml" -Encoding utf8
-          
-          Write-Host "Starting FRP Client tunnel..."
-          $logFile = "$env:RUNNER_TEMP\frpc.log"
-          Start-Process -FilePath $frpcExe -ArgumentList "-c `"$env:RUNNER_TEMP\frp\frpc.toml`"" -RedirectStandardOutput $logFile -RedirectStandardError "$env:RUNNER_TEMP\frpc.err" -WindowStyle Hidden
-          
-          Write-Host "Waiting for FRP to connect to your VPS..."
-          Start-Sleep -Seconds 10
-          
-          $frpAddress = "$env:FRP_SERVER_IP`:$env:FRP_REMOTE_PORT"
-          Write-Host "======================================================="
-          Write-Host "FRP PUBLIC ADDRESS: $frpAddress"
-          Write-Host "======================================================="
-          "FRP_ADDR=$frpAddress" >> $env:GITHUB_ENV
+          if ($hypertunnelAddress) {
+              Write-Host "======================================================="
+              Write-Host "HYPERTUNNEL PUBLIC ADDRESS: $hypertunnelAddress"
+              Write-Host "======================================================="
+              "HYPERTUNNEL_ADDR=$hypertunnelAddress" >> $env:GITHUB_ENV
+          } else {
+              Write-Host "[ERROR] Could not detect Hypertunnel address."
+              if (Test-Path "$env:RUNNER_TEMP\hypertunnel.log") { 
+                  Get-Content "$env:RUNNER_TEMP\hypertunnel.log" -Tail 20 | Write-Host 
+              }
+              throw "Failed to establish Hypertunnel."
+          }
 
       # ============================================================
       # STEP 4: KEEP-ALIVE PROBE (TCP 1 byte/sec)
@@ -186,19 +181,19 @@ jobs:
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (FRP VPS RDP)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Hypertunnel RDP)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Connection Details:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Public Address (IP:Port):** ``$env:FRP_ADDR``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Public Address (Host:Port):** ``$env:HYPERTUNNEL_ADDR``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
           Add-Content -Path $summaryFile -Value "1. Open **Remote Desktop Connection** (mstsc)." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. In the 'Computer' field, enter the **Public Address** above." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. In the 'Computer' field, enter the **Public Address** above (e.g., hypertunnel.ga:19432)." -Encoding utf8
           Add-Content -Path $summaryFile -Value "3. Enter the Username and Password above when prompted." -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "> **Note:** Requires your VPS (FRP Server) to be running and Ports 7000, $env:FRP_REMOTE_PORT to be open." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "> **Note:** Hypertunnel is a free community service. If the connection drops, wait a moment and try again." -Encoding utf8
 
       # ============================================================
       # STEP 6: KEEP SESSION ALIVE
@@ -207,6 +202,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via FRP..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via Hypertunnel..."
               Start-Sleep -Seconds 300
           }
