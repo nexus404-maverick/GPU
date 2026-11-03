@@ -75,11 +75,13 @@ jobs:
           New-Item -Path $tsPolicyPath -Force | Out-Null
           Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
           
+          # Set cho user hiện tại
           $RegPath = "HKCU:\Control Panel\Desktop"
           Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
           Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
           Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
           
+          # Set cho Default User
           try {
               reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
               $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
@@ -101,7 +103,7 @@ jobs:
           Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 3: PINGGY TUNNEL WITH AUTO-RESTART
+      # STEP 3: PINGGY TUNNEL WITH AUTO-RESTART (FIXED WITH -T)
       # ============================================================
       - name: Start Pinggy Tunnel (Auto-Restart)
         shell: powershell
@@ -115,9 +117,9 @@ jobs:
           $tunnelJob = Start-Job -ScriptBlock {
               param($logFile, $errFile)
               while ($true) {
-                  # Chạy Pinggy qua SSH (có sẵn trên Windows)
-                  # -o ServerAliveInterval=15: Gửi gói tin giữ kết nối mỗi 15 giây
-                  $sshProcess = Start-Process -FilePath "ssh" -ArgumentList "-p 443 -R0:localhost:3389 -o StrictHostKeyChecking=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 tcp@free.pinggy.io" -RedirectStandardOutput $logFile -RedirectStandardError $errFile -WindowStyle Hidden -PassThru
+                  # FIX: Thêm cờ -T để tắt cấp phát pseudo-terminal
+                  # Điều này cần thiết cho môi trường không có terminal như GitHub Actions
+                  $sshProcess = Start-Process -FilePath "ssh" -ArgumentList "-T -p 443 -R0:localhost:3389 -o StrictHostKeyChecking=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 tcp@free.pinggy.io" -RedirectStandardOutput $logFile -RedirectStandardError $errFile -WindowStyle Hidden -PassThru
                   
                   # Chờ cho đến khi tiến trình SSH chết
                   $sshProcess.WaitForExit()
