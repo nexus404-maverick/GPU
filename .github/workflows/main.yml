@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (ProxVN RDP Tunnel)
+name: ThyoCloud Workspace (Bore RDP Tunnel)
 
 on:
   workflow_dispatch:
@@ -56,7 +56,7 @@ jobs:
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
       # ============================================================
-      # STEP 2: SET WALLPAPER
+      # STEP 2: SET WALLPAPER (FIXED FOR RDP)
       # ============================================================
       - name: Set Wallpaper
         shell: powershell
@@ -70,15 +70,18 @@ jobs:
           $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
           Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
           
+          # Tắt chính sách chặn wallpaper trên RDP
           $tsPolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           New-Item -Path $tsPolicyPath -Force | Out-Null
           Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
           
+          # Set cho user hiện tại
           $RegPath = "HKCU:\Control Panel\Desktop"
           Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
           Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
           Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
           
+          # Set cho Default User
           try {
               reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
               $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
@@ -88,6 +91,7 @@ jobs:
               reg unload "HKU\DefaultUser" | Out-Null
           } catch { Write-Host "[WARNING] Could not update default user wallpaper." }
           
+          # Refresh để áp dụng ngay
           Add-Type -TypeDefinition @"
           using System;
           using System.Runtime.InteropServices;
@@ -100,52 +104,53 @@ jobs:
           Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 3: DOWNLOAD AND RUN PROXVN TUNNEL
+      # STEP 3: DOWNLOAD AND RUN BORE TUNNEL
       # ============================================================
-      - name: Setup ProxVN Tunnel
+      - name: Setup Bore Tunnel
         shell: powershell
         run: |
-          Write-Host "Downloading ProxVN Client for Windows..."
-          $proxvnPath = "$env:RUNNER_TEMP\proxvn.exe"
+          Write-Host "Downloading Bore (Windows binary)..."
+          $boreZip = "$env:RUNNER_TEMP\bore.zip"
           
-          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $proxvnPath "https://bacsycay.click/bin/client/proxvn-windows-amd64.exe"
+          # Tải bản Bore v0.6.0 (đã kiểm chứng hoạt động)
+          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $boreZip "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip"
           
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $proxvnPath)) {
-              throw "Failed to download ProxVN client."
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $boreZip)) {
+              throw "Failed to download Bore."
           }
           
-          Write-Host "Starting ProxVN tunnel for RDP (port 3389)..."
-          # Chạy ProxVN với giao thức TCP cho cổng RDP
-          $logFile = "$env:RUNNER_TEMP\proxvn.log"
-          Start-Process -FilePath $proxvnPath -ArgumentList "--proto tcp 3389" -RedirectStandardOutput $logFile -RedirectStandardError "$env:RUNNER_TEMP\proxvn.err" -WindowStyle Hidden
+          Expand-Archive -Path $boreZip -DestinationPath "$env:RUNNER_TEMP\bore" -Force
+          $borePath = (Get-ChildItem -Path "$env:RUNNER_TEMP\bore" -Filter "bore*.exe" -Recurse | Select-Object -First 1).FullName
+          if (-not $borePath) { throw "Bore executable not found." }
           
-          Write-Host "Waiting for ProxVN to establish tunnel..."
-          Start-Sleep -Seconds 15
+          Write-Host "Starting Bore tunnel for RDP (port 3389)..."
+          $logFile = "$env:RUNNER_TEMP\bore.log"
+          Start-Process -FilePath $borePath -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput $logFile -RedirectStandardError "$env:RUNNER_TEMP\bore.err" -WindowStyle Hidden
           
-          $proxvnAddress = $null
+          Write-Host "Waiting for Bore to assign a public port..."
+          $boreAddress = $null
           $attempts = 0
-          while (-not $proxvnAddress -and $attempts -lt 20) {
+          while (-not $boreAddress -and $attempts -lt 20) {
               Start-Sleep -Seconds 2
               if (Test-Path $logFile) {
                   $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-                  # ProxVN in ra địa chỉ dạng "Public Address: 103.77.246.196:PORT"
-                  if ($content -match 'Public Address:\s*([0-9\.]+:\d+)') {
-                      $proxvnAddress = $matches[1]
+                  if ($content -match 'bore\.pub:(\d+)') {
+                      $boreAddress = "bore.pub:$($matches[1])"
                   }
               }
               $attempts++
           }
           
-          if ($proxvnAddress) {
+          if ($boreAddress) {
               Write-Host "======================================================="
-              Write-Host "PROXVN PUBLIC ADDRESS: $proxvnAddress"
+              Write-Host "BORE PUBLIC ADDRESS: $boreAddress"
               Write-Host "======================================================="
-              "PROXVN_ADDR=$proxvnAddress" >> $env:GITHUB_ENV
+              "BORE_ADDR=$boreAddress" >> $env:GITHUB_ENV
           } else {
-              Write-Host "[ERROR] Could not detect ProxVN public address."
+              Write-Host "[ERROR] Could not detect Bore address."
               if (Test-Path $logFile) { Get-Content $logFile -Tail 20 | Write-Host }
-              if (Test-Path "$env:RUNNER_TEMP\proxvn.err") { Get-Content "$env:RUNNER_TEMP\proxvn.err" -Tail 20 | Write-Host }
-              throw "Failed to establish ProxVN tunnel."
+              if (Test-Path "$env:RUNNER_TEMP\bore.err") { Get-Content "$env:RUNNER_TEMP\bore.err" -Tail 20 | Write-Host }
+              throw "Failed to establish Bore tunnel."
           }
 
       # ============================================================
@@ -178,16 +183,16 @@ jobs:
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (ProxVN RDP)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Bore RDP)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Connection Details:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Public Address (IP:Port):** ``$env:PROXVN_ADDR``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Public Address (IP:Port):** ``$env:BORE_ADDR``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
           Add-Content -Path $summaryFile -Value "1. Open **Remote Desktop Connection** (mstsc)." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. In the 'Computer' field, enter the **Public Address** above (e.g., 103.77.246.196:12345)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. In the 'Computer' field, enter the **Public Address** above." -Encoding utf8
           Add-Content -Path $summaryFile -Value "3. Enter the Username and Password above when prompted." -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "> **Note:** No VPN or additional software is required. The tunnel is active as long as this workflow runs." -Encoding utf8
@@ -199,6 +204,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via ProxVN..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via Bore..."
               Start-Sleep -Seconds 300
           }
