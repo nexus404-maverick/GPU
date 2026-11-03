@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (Tunnelo RDP Tunnel)
+name: ThyoCloud Workspace (Cloudflare RDP Tunnel)
 
 on:
   workflow_dispatch:
@@ -70,7 +70,6 @@ jobs:
           $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
           Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
           
-          # Tắt chính sách chặn wallpaper trên RDP
           $tsPolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           New-Item -Path $tsPolicyPath -Force | Out-Null
           Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
@@ -101,62 +100,27 @@ jobs:
           Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 3: INSTALL, LOGIN AND RUN TUNNELO
+      # STEP 3: DOWNLOAD AND RUN CLOUDFLARE TUNNEL
       # ============================================================
-      - name: Setup Tunnelo Tunnel
+      - name: Setup Cloudflare Tunnel
         shell: powershell
         env:
-          TUNNELO_TOKEN: ${{ secrets.TUNNELO_TOKEN }}
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
-          Write-Host "Downloading Tunnelo for Windows..."
-          $tunneloExe = "$env:RUNNER_TEMP\tunnelo.exe"
-          $downloadUrl = "https://github.com/tunnelo/tunnelo/releases/latest/download/tunnelo-windows-amd64.exe"
-          curl.exe -L --fail --retry 3 -o $tunneloExe $downloadUrl
+          Write-Host "Downloading cloudflared..."
+          $cfExe = "$env:RUNNER_TEMP\cloudflared.exe"
+          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $cfExe "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
           
-          if (-not (Test-Path $tunneloExe)) { throw "Failed to download Tunnelo." }
+          if (-not (Test-Path $cfExe)) { throw "Failed to download cloudflared." }
           
-          Write-Host "Logging into Tunnelo..."
-          # Đăng nhập bằng Access Token lấy từ GitHub Secrets
-          & $tunneloExe login --key $env:TUNNELO_TOKEN
+          Write-Host "Starting Cloudflare Tunnel..."
+          $logFile = "$env:RUNNER_TEMP\cloudflared.log"
+          Start-Process -FilePath $cfExe -ArgumentList "tunnel --no-autoupdate run --token $env:CF_TOKEN" -RedirectStandardOutput $logFile -RedirectStandardError "$env:RUNNER_TEMP\cloudflared.err" -WindowStyle Hidden
           
-          Write-Host "Starting Tunnelo tunnel for RDP (port 3389)..."
-          # Tạo một job chạy ngầm, tự động khởi động lại nếu tunnel bị ngắt
-          $tunnelJob = Start-Job -ScriptBlock {
-              param($exePath, $logPath)
-              while ($true) {
-                  # Tạo tunnel tcp cho cổng 3389
-                  $output = & $exePath add rdp 3389 2>&1
-                  $output | Out-File -FilePath $logPath -Encoding utf8
-                  Start-Sleep -Seconds 5
-              }
-          } -ArgumentList $tunneloExe, "$env:RUNNER_TEMP\tunnelo.log"
+          Write-Host "Waiting for tunnel to connect..."
+          Start-Sleep -Seconds 15
           
-          Write-Host "Waiting for Tunnelo to assign an address..."
-          $tunneloAddress = $null
-          $attempts = 0
-          
-          while (-not $tunneloAddress -and $attempts -lt 30) {
-              Start-Sleep -Seconds 2
-              if (Test-Path "$env:RUNNER_TEMP\tunnelo.log") {
-                  $content = Get-Content "$env:RUNNER_TEMP\tunnelo.log" -Raw -ErrorAction SilentlyContinue
-                  # Tìm địa chỉ tunnel (thường có dạng domain:port)
-                  if ($content -match 'tcp://([a-zA-Z0-9\.\-]+:\d+)') {
-                      $tunneloAddress = $matches[1]
-                  }
-              }
-              $attempts++
-          }
-          
-          if ($tunneloAddress) {
-              Write-Host "======================================================="
-              Write-Host "TUNNELO PUBLIC ADDRESS: $tunneloAddress"
-              Write-Host "======================================================="
-              "TUNNELO_ADDR=$tunneloAddress" >> $env:GITHUB_ENV
-          } else {
-              Write-Host "[ERROR] Could not detect Tunnelo address. Check logs."
-              if (Test-Path "$env:RUNNER_TEMP\tunnelo.log") { Get-Content "$env:RUNNER_TEMP\tunnelo.log" -Tail 20 | Write-Host }
-              throw "Failed to establish Tunnelo tunnel."
-          }
+          Write-Host "Tunnel is running in the background."
 
       # ============================================================
       # STEP 4: KEEP-ALIVE PROBE (TCP 1 byte/sec)
@@ -188,19 +152,21 @@ jobs:
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Tunnelo RDP)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Cloudflare RDP)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Connection Details:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Public Address (IP:Port):** ``$env:TUNNELO_ADDR``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Domain:** ``YOUR_DOMAIN_HERE`` (Thay bằng tên miền bạn đã trỏ trên Cloudflare)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "1. Open **Remote Desktop Connection** (mstsc)." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. In the 'Computer' field, enter the **Public Address** above." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "3. Enter the Username and Password above when prompted." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Make sure cloudflared is installed on your PC." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Run this command in cmd/powershell: ``cloudflared access tcp --hostname YOUR_DOMAIN_HERE --url localhost:13389``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "3. Open Remote Desktop Connection (mstsc)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "4. In the Computer field, enter: ``localhost:13389``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "5. Enter the Username and Password above." -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "> **Note:** Tunnel is running with Auto-Restart. If the connection drops, wait 10 seconds and reconnect." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "> **Note:** Requires Cloudflare Tunnel to be configured in your Cloudflare Dashboard." -Encoding utf8
 
       # ============================================================
       # STEP 6: KEEP SESSION ALIVE
@@ -209,6 +175,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via Tunnelo..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via Cloudflare..."
               Start-Sleep -Seconds 300
           }
