@@ -67,15 +67,8 @@ jobs:
                   reg unload "HKU\DefaultUser" | Out-Null
               } catch {}
               
-              # SỬ DỤNG HERE-STRING ĐỂ TRÁNH LỖI CÚ PHÁP
-              $csharpCode = @'
-              using System;
-              using System.Runtime.InteropServices;
-              public class Wallpaper {
-                  [DllImport("user32.dll", CharSet = CharSet.Auto)]
-                  public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
-              }
-            '@
+              # SỬ DỤNG CHUỖI 1 DÒNG ĐỂ TRÁNH LỖI YAML
+              $csharpCode = 'using System; using System.Runtime.InteropServices; public class Wallpaper { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
               Add-Type -TypeDefinition $csharpCode
               [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
               Write-Host "[SUCCESS] Wallpaper changed!"
