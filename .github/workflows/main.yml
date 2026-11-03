@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (Hypertunnel RDP)
+name: ThyoCloud Workspace (Tunnelo RDP Tunnel)
 
 on:
   workflow_dispatch:
@@ -70,6 +70,7 @@ jobs:
           $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
           Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
           
+          # Tắt chính sách chặn wallpaper trên RDP
           $tsPolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           New-Item -Path $tsPolicyPath -Force | Out-Null
           Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
@@ -100,55 +101,61 @@ jobs:
           Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 3: SETUP AND RUN HYPERTUNNEL (WITH AUTO-RESTART)
+      # STEP 3: INSTALL, LOGIN AND RUN TUNNELO
       # ============================================================
-      - name: Start Hypertunnel for RDP
+      - name: Setup Tunnelo Tunnel
         shell: powershell
+        env:
+          TUNNELO_TOKEN: ${{ secrets.TUNNELO_TOKEN }}
         run: |
-          Write-Host "Setting up Node.js and Hypertunnel..."
-          # GitHub Actions runner đã có sẵn Node.js, chỉ cần dùng npx
-          # Tạo một background job để tự động khởi động lại nếu tunnel bị ngắt
+          Write-Host "Downloading Tunnelo for Windows..."
+          $tunneloExe = "$env:RUNNER_TEMP\tunnelo.exe"
+          $downloadUrl = "https://github.com/tunnelo/tunnelo/releases/latest/download/tunnelo-windows-amd64.exe"
+          curl.exe -L --fail --retry 3 -o $tunneloExe $downloadUrl
+          
+          if (-not (Test-Path $tunneloExe)) { throw "Failed to download Tunnelo." }
+          
+          Write-Host "Logging into Tunnelo..."
+          # Đăng nhập bằng Access Token lấy từ GitHub Secrets
+          & $tunneloExe login --key $env:TUNNELO_TOKEN
+          
+          Write-Host "Starting Tunnelo tunnel for RDP (port 3389)..."
+          # Tạo một job chạy ngầm, tự động khởi động lại nếu tunnel bị ngắt
           $tunnelJob = Start-Job -ScriptBlock {
+              param($exePath, $logPath)
               while ($true) {
-                  Write-Host "[Hypertunnel Monitor] Starting tunnel to localhost:3389..."
-                  $output = npx --yes hypertunnel --port 3389 2>&1
-                  
-                  # Ghi log ra file để dễ debug nếu cần
-                  $output | Out-File -FilePath "$env:RUNNER_TEMP\hypertunnel.log" -Encoding utf8
-                  
-                  # Kiểm tra nếu có lỗi hoặc tunnel bị ngắt, nghỉ 5 giây rồi thử lại
+                  # Tạo tunnel tcp cho cổng 3389
+                  $output = & $exePath add rdp 3389 2>&1
+                  $output | Out-File -FilePath $logPath -Encoding utf8
                   Start-Sleep -Seconds 5
               }
-          }
-          Write-Host "Tunnel monitor started (Job ID: $($tunnelJob.Id))."
+          } -ArgumentList $tunneloExe, "$env:RUNNER_TEMP\tunnelo.log"
           
-          Write-Host "Waiting for Hypertunnel to assign a public address..."
-          $hypertunnelAddress = $null
+          Write-Host "Waiting for Tunnelo to assign an address..."
+          $tunneloAddress = $null
           $attempts = 0
           
-          while (-not $hypertunnelAddress -and $attempts -lt 30) {
+          while (-not $tunneloAddress -and $attempts -lt 30) {
               Start-Sleep -Seconds 2
-              if (Test-Path "$env:RUNNER_TEMP\hypertunnel.log") {
-                  $content = Get-Content "$env:RUNNER_TEMP\hypertunnel.log" -Raw -ErrorAction SilentlyContinue
-                  # Tìm địa chỉ dạng hypertunnel.ga:19432 trong output
-                  if ($content -match 'hypertunnel\.ga:(\d+)') {
-                      $hypertunnelAddress = "hypertunnel.ga:$($matches[1])"
+              if (Test-Path "$env:RUNNER_TEMP\tunnelo.log") {
+                  $content = Get-Content "$env:RUNNER_TEMP\tunnelo.log" -Raw -ErrorAction SilentlyContinue
+                  # Tìm địa chỉ tunnel (thường có dạng domain:port)
+                  if ($content -match 'tcp://([a-zA-Z0-9\.\-]+:\d+)') {
+                      $tunneloAddress = $matches[1]
                   }
               }
               $attempts++
           }
           
-          if ($hypertunnelAddress) {
+          if ($tunneloAddress) {
               Write-Host "======================================================="
-              Write-Host "HYPERTUNNEL PUBLIC ADDRESS: $hypertunnelAddress"
+              Write-Host "TUNNELO PUBLIC ADDRESS: $tunneloAddress"
               Write-Host "======================================================="
-              "HYPERTUNNEL_ADDR=$hypertunnelAddress" >> $env:GITHUB_ENV
+              "TUNNELO_ADDR=$tunneloAddress" >> $env:GITHUB_ENV
           } else {
-              Write-Host "[ERROR] Could not detect Hypertunnel address."
-              if (Test-Path "$env:RUNNER_TEMP\hypertunnel.log") { 
-                  Get-Content "$env:RUNNER_TEMP\hypertunnel.log" -Tail 20 | Write-Host 
-              }
-              throw "Failed to establish Hypertunnel."
+              Write-Host "[ERROR] Could not detect Tunnelo address. Check logs."
+              if (Test-Path "$env:RUNNER_TEMP\tunnelo.log") { Get-Content "$env:RUNNER_TEMP\tunnelo.log" -Tail 20 | Write-Host }
+              throw "Failed to establish Tunnelo tunnel."
           }
 
       # ============================================================
@@ -181,19 +188,19 @@ jobs:
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Hypertunnel RDP)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Tunnelo RDP)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Connection Details:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Public Address (Host:Port):** ``$env:HYPERTUNNEL_ADDR``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Public Address (IP:Port):** ``$env:TUNNELO_ADDR``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
           Add-Content -Path $summaryFile -Value "1. Open **Remote Desktop Connection** (mstsc)." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. In the 'Computer' field, enter the **Public Address** above (e.g., hypertunnel.ga:19432)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. In the 'Computer' field, enter the **Public Address** above." -Encoding utf8
           Add-Content -Path $summaryFile -Value "3. Enter the Username and Password above when prompted." -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "> **Note:** Hypertunnel is a free community service. If the connection drops, wait a moment and try again." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "> **Note:** Tunnel is running with Auto-Restart. If the connection drops, wait 10 seconds and reconnect." -Encoding utf8
 
       # ============================================================
       # STEP 6: KEEP SESSION ALIVE
@@ -202,6 +209,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via Hypertunnel..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via Tunnelo..."
               Start-Sleep -Seconds 300
           }
