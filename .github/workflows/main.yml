@@ -67,8 +67,16 @@ jobs:
                   reg unload "HKU\DefaultUser" | Out-Null
               } catch {}
               
-              # Sử dụng C# 1 dòng để tránh lỗi Here-String trong YAML
-              Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class Wallpaper { [DllImport(\"user32.dll\")] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }"
+              # SỬ DỤNG HERE-STRING ĐỂ TRÁNH LỖI CÚ PHÁP
+              $csharpCode = @'
+              using System;
+              using System.Runtime.InteropServices;
+              public class Wallpaper {
+                  [DllImport("user32.dll", CharSet = CharSet.Auto)]
+                  public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+              }
+            '@
+              Add-Type -TypeDefinition $csharpCode
               [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
               Write-Host "[SUCCESS] Wallpaper changed!"
           }
