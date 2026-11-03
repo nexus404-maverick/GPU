@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (Pinggy Auto-Restart RDP)
+name: ThyoCloud Workspace (FRP VPS Tunnel)
 
 on:
   workflow_dispatch:
@@ -103,62 +103,58 @@ jobs:
           Write-Host "[SUCCESS] Wallpaper changed!"
 
       # ============================================================
-      # STEP 3: PINGGY TUNNEL WITH AUTO-RESTART (FIXED WITH -T)
+      # STEP 3: DOWNLOAD AND RUN FRP CLIENT
       # ============================================================
-      - name: Start Pinggy Tunnel (Auto-Restart)
+      - name: Setup FRP Client Tunnel
         shell: powershell
+        env:
+          FRP_SERVER_IP: ${{ secrets.FRP_SERVER_IP }}
+          FRP_AUTH_TOKEN: ${{ secrets.FRP_AUTH_TOKEN }}
+          FRP_REMOTE_PORT: ${{ secrets.FRP_REMOTE_PORT }}
         run: |
-          Write-Host "Starting Pinggy TCP tunnel for RDP (port 3389)..."
+          Write-Host "Downloading FRP Client..."
+          $frpZip = "$env:RUNNER_TEMP\frp.zip"
           
-          $logFile = "$env:RUNNER_TEMP\pinggy.log"
-          $errFile = "$env:RUNNER_TEMP\pinggy.err"
+          # Tải FRP v0.61.0 (Bản ổn định)
+          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $frpZip "https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
           
-          # Tạo một Background Job giám sát, tự động khởi động lại nếu rớt mạng
-          $tunnelJob = Start-Job -ScriptBlock {
-              param($logFile, $errFile)
-              while ($true) {
-                  # FIX: Thêm cờ -T để tắt cấp phát pseudo-terminal
-                  # Điều này cần thiết cho môi trường không có terminal như GitHub Actions
-                  $sshProcess = Start-Process -FilePath "ssh" -ArgumentList "-T -p 443 -R0:localhost:3389 -o StrictHostKeyChecking=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 tcp@free.pinggy.io" -RedirectStandardOutput $logFile -RedirectStandardError $errFile -WindowStyle Hidden -PassThru
-                  
-                  # Chờ cho đến khi tiến trình SSH chết
-                  $sshProcess.WaitForExit()
-                  
-                  # Nếu chết, nghỉ 3 giây rồi khởi động lại
-                  Write-Host "[Tunnel Monitor] Tunnel disconnected! Restarting in 3 seconds..."
-                  Start-Sleep -Seconds 3
-              }
-          } -ArgumentList $logFile, $errFile
-          
-          Write-Host "Tunnel monitor started (Job ID: $($tunnelJob.Id))."
-          
-          Write-Host "Waiting for Pinggy to assign a public address..."
-          $pinggyAddress = $null
-          $attempts = 0
-          
-          while (-not $pinggyAddress -and $attempts -lt 30) {
-              Start-Sleep -Seconds 2
-              if (Test-Path $logFile) {
-                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-                  # Pinggy in ra địa chỉ dạng tcp://xxxx.free.pinggy.link:12345
-                  if ($content -match 'tcp://([a-zA-Z0-9.]+):(\d+)') {
-                      $pinggyAddress = "$($matches[1]):$($matches[2])"
-                  }
-              }
-              $attempts++
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $frpZip)) {
+              throw "Failed to download FRP Client."
           }
           
-          if ($pinggyAddress) {
-              Write-Host "======================================================="
-              Write-Host "PINGGY PUBLIC ADDRESS: $pinggyAddress"
-              Write-Host "======================================================="
-              "PINGGY_ADDR=$pinggyAddress" >> $env:GITHUB_ENV
-          } else {
-              Write-Host "[ERROR] Could not detect Pinggy address."
-              if (Test-Path $logFile) { Get-Content $logFile -Tail 20 | Write-Host }
-              if (Test-Path $errFile) { Get-Content $errFile -Tail 20 | Write-Host }
-              throw "Failed to establish Pinggy tunnel."
-          }
+          Expand-Archive -Path $frpZip -DestinationPath "$env:RUNNER_TEMP\frp" -Force
+          $frpcExe = (Get-ChildItem -Path "$env:RUNNER_TEMP\frp" -Filter "frpc.exe" -Recurse | Select-Object -First 1).FullName
+          if (-not $frpcExe) { throw "FRP Client executable not found." }
+          
+          Write-Host "Creating FRP configuration..."
+          $configContent = @"
+          serverAddr = "$env:FRP_SERVER_IP"
+          serverPort = 7000
+          auth.method = "token"
+          auth.token = "$env:FRP_AUTH_TOKEN"
+          loginFailExit = true
+
+          [[proxies]]
+          name = "github-rdp"
+          type = "tcp"
+          localIP = "127.0.0.1"
+          localPort = 3389
+          remotePort = $env:FRP_REMOTE_PORT
+          "@
+          $configContent | Out-File -FilePath "$env:RUNNER_TEMP\frp\frpc.toml" -Encoding utf8
+          
+          Write-Host "Starting FRP Client tunnel..."
+          $logFile = "$env:RUNNER_TEMP\frpc.log"
+          Start-Process -FilePath $frpcExe -ArgumentList "-c `"$env:RUNNER_TEMP\frp\frpc.toml`"" -RedirectStandardOutput $logFile -RedirectStandardError "$env:RUNNER_TEMP\frpc.err" -WindowStyle Hidden
+          
+          Write-Host "Waiting for FRP to connect to your VPS..."
+          Start-Sleep -Seconds 10
+          
+          $frpAddress = "$env:FRP_SERVER_IP`:$env:FRP_REMOTE_PORT"
+          Write-Host "======================================================="
+          Write-Host "FRP PUBLIC ADDRESS: $frpAddress"
+          Write-Host "======================================================="
+          "FRP_ADDR=$frpAddress" >> $env:GITHUB_ENV
 
       # ============================================================
       # STEP 4: KEEP-ALIVE PROBE (TCP 1 byte/sec)
@@ -190,10 +186,10 @@ jobs:
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Pinggy RDP)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (FRP VPS RDP)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Connection Details:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Public Address (IP:Port):** ``$env:PINGGY_ADDR``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Public Address (IP:Port):** ``$env:FRP_ADDR``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
@@ -202,7 +198,7 @@ jobs:
           Add-Content -Path $summaryFile -Value "2. In the 'Computer' field, enter the **Public Address** above." -Encoding utf8
           Add-Content -Path $summaryFile -Value "3. Enter the Username and Password above when prompted." -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "> **Note:** Tunnel is running with Auto-Restart. If the connection drops, wait 10 seconds and reconnect." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "> **Note:** Requires your VPS (FRP Server) to be running and Ports 7000, $env:FRP_REMOTE_PORT to be open." -Encoding utf8
 
       # ============================================================
       # STEP 6: KEEP SESSION ALIVE
@@ -211,6 +207,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via Pinggy..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via FRP..."
               Start-Sleep -Seconds 300
           }
