@@ -68,27 +68,25 @@ jobs:
           }
 
       # ============================================================
-      # STEP 2: TẢI VÀ CÀI ĐẶT RUSTDESK QUA MSI (KHÔNG BỊ TREO)
+      # STEP 2: TẢI VÀ CÀI ĐẶT RUSTDESK QUA MSI
       # ============================================================
       - name: Install RustDesk (MSI)
         shell: powershell
         run: |
           Write-Host "Đang tải RustDesk MSI..."
           $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
-          # Sử dụng gói MSI chính thức từ GitHub Releases
           $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
           
           curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $msiPath $url
           
           if (-not (Test-Path $msiPath)) { throw "Tải RustDesk MSI thất bại." }
           
-          Write-Host "Đang cài đặt ngầm qua msiexec (không chờ)..."
-          # Sử dụng msiexec với tham số /qn (quiet, no UI) và KHÔNG dùng -Wait
-          # để tránh bị treo nếu tiến trình con không thoát ra
-          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -NoNewWindow
+          Write-Host "Đang cài đặt ngầm qua msiexec..."
+          # Với MSI, dùng -Wait sẽ không bị treo như EXE
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait -NoNewWindow
           
           Write-Host "Đang chờ dịch vụ RustDesk khởi tạo..."
-          Start-Sleep -Seconds 30
+          Start-Sleep -Seconds 15
 
       # ============================================================
       # STEP 3: CẤU HÌNH VÀ BẬT GIAO DIỆN RUSTDESK
@@ -101,26 +99,42 @@ jobs:
               $rustdeskExe = "C:\Program Files (x86)\RustDesk\rustdesk.exe"
           }
           if (-not (Test-Path $rustdeskExe)) { throw "Không tìm thấy file thực thi RustDesk." }
+
+          # Đảm bảo Service của RustDesk đã chạy
+          Write-Host "Đang khởi động dịch vụ RustDesk..."
+          Start-Service -Name "RustDesk" -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
           
           Write-Host "Đang áp dụng mật khẩu..."
           & $rustdeskExe --password $env:RUSTDESK_PASS
           
-          Write-Host "Đang lấy ID RustDesk..."
+          Write-Host "Đang lấy ID RustDesk (có thể mất 1-2 phút)..."
           $rustdeskId = $null
           $attempts = 0
-          while (-not $rustdeskId -and $attempts -lt 15) {
-              $idOutput = & $rustdeskExe --get-id 2>&1
-              foreach ($line in $idOutput) {
-                  if (([string]$line).Trim() -match '^\d{9,10}$') {
-                      $rustdeskId = $matches[0]
-                      break
-                  }
+          # Tăng lên 20 lần thử, mỗi lần 5 giây
+          while (-not $rustdeskId -and $attempts -lt 20) {
+              $idOutput = (& $rustdeskExe --get-id 2>&1) | Out-String
+              
+              # In ra log để debug nếu cần
+              Write-Host "Lần thử $($attempts+1): $($idOutput.Trim())"
+              
+              # Tìm bất kỳ dãy số nào từ 9-10 chữ số trong output
+              if ($idOutput -match '(\d{9,10})') {
+                  $rustdeskId = $matches[1]
+                  break
               }
-              if (-not $rustdeskId) { Start-Sleep -Seconds 3 }
+              
+              Start-Sleep -Seconds 5
               $attempts++
           }
           
-          if (-not $rustdeskId) { throw "Không thể lấy ID RustDesk." }
+          if (-not $rustdeskId) { 
+              throw "Không thể lấy ID RustDesk sau 20 lần thử. Vui lòng kiểm tra lại kết nối mạng của GitHub Runner." 
+          }
+          
+          Write-Host "======================================================="
+          Write-Host "ĐÃ LẤY ĐƯỢC ID: $rustdeskId"
+          Write-Host "======================================================="
           
           "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
           
