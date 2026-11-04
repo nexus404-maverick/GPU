@@ -62,27 +62,33 @@ jobs:
               Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
               Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
               
-              # GỘP CODE C# THÀNH 1 DÒNG ĐỂ TRÁNH LỖI YAML
               $csharpCode = 'using System; using System.Runtime.InteropServices; public class Wallpaper { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
               Add-Type -TypeDefinition $csharpCode
               [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
           }
 
       # ============================================================
-      # STEP 2: TẢI VÀ CÀI ĐẶT RUSTDESK
+      # STEP 2: TẢI VÀ CÀI ĐẶT RUSTDESK QUA MSI (KHÔNG BỊ TREO)
       # ============================================================
-      - name: Install RustDesk
+      - name: Install RustDesk (MSI)
         shell: powershell
         run: |
-          Write-Host "Đang tải RustDesk 1.2.6..."
-          $installer = "$env:RUNNER_TEMP\rustdesk.exe"
-          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.exe"
+          Write-Host "Đang tải RustDesk MSI..."
+          $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
+          # Sử dụng gói MSI chính thức từ GitHub Releases
+          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
           
-          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $installer $url
+          curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $msiPath $url
           
-          Write-Host "Đang cài đặt ngầm..."
-          Start-Process -FilePath $installer -ArgumentList "--silent-install" -Wait -NoNewWindow
-          Start-Sleep -Seconds 20
+          if (-not (Test-Path $msiPath)) { throw "Tải RustDesk MSI thất bại." }
+          
+          Write-Host "Đang cài đặt ngầm qua msiexec (không chờ)..."
+          # Sử dụng msiexec với tham số /qn (quiet, no UI) và KHÔNG dùng -Wait
+          # để tránh bị treo nếu tiến trình con không thoát ra
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -NoNewWindow
+          
+          Write-Host "Đang chờ dịch vụ RustDesk khởi tạo..."
+          Start-Sleep -Seconds 30
 
       # ============================================================
       # STEP 3: CẤU HÌNH VÀ BẬT GIAO DIỆN RUSTDESK
@@ -94,6 +100,7 @@ jobs:
           if (-not (Test-Path $rustdeskExe)) {
               $rustdeskExe = "C:\Program Files (x86)\RustDesk\rustdesk.exe"
           }
+          if (-not (Test-Path $rustdeskExe)) { throw "Không tìm thấy file thực thi RustDesk." }
           
           Write-Host "Đang áp dụng mật khẩu..."
           & $rustdeskExe --password $env:RUSTDESK_PASS
@@ -112,6 +119,8 @@ jobs:
               if (-not $rustdeskId) { Start-Sleep -Seconds 3 }
               $attempts++
           }
+          
+          if (-not $rustdeskId) { throw "Không thể lấy ID RustDesk." }
           
           "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
           
