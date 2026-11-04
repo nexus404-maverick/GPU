@@ -18,14 +18,14 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # STEP 1: TẠO MẬT KHẨU, CÀI HÌNH NỀN VÀ TẮT TIMEOUT MÀN HÌNH
+      # STEP 1: CREATE PASSWORD, SET WALLPAPER & KEEP SCREEN AWAKE
       # ============================================================
-      - name: Setup RustDesk Password, Wallpaper & Keep Screen Awake
+      - name: Setup RustDesk Password & Wallpaper
         shell: powershell
         env:
           RPASS_INPUT: ${{ github.event.inputs.customPassword }}
         run: |
-          Write-Host "Đang tạo mật khẩu RustDesk..."
+          Write-Host "Setting up RustDesk permanent password..."
           if ([string]::IsNullOrEmpty($env:RPASS_INPUT)) {
               $upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
               $lower = "abcdefghijkmnopqrstuvwxyz"
@@ -40,14 +40,14 @@ jobs:
           
           "RUSTDESK_PASS=$RPASS" >> $env:GITHUB_ENV
           
-          Write-Host "Đang cấu hình để màn hình không bị tắt..."
+          Write-Host "Keeping screen awake..."
           powercfg /change monitor-timeout-ac 0
           powercfg /change monitor-timeout-dc 0
           powercfg /change standby-timeout-ac 0
           powercfg /change standby-timeout-dc 0
 
           # Set Wallpaper
-          Write-Host "Đang cài đặt hình nền..."
+          Write-Host "Setting up wallpaper..."
           $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
           if (Test-Path $LocalWallpaper) {
               $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
@@ -68,28 +68,27 @@ jobs:
           }
 
       # ============================================================
-      # STEP 2: TẢI VÀ CÀI ĐẶT RUSTDESK QUA MSI
+      # STEP 2: DOWNLOAD AND INSTALL RUSTDESK
       # ============================================================
       - name: Install RustDesk (MSI)
         shell: powershell
         run: |
-          Write-Host "Đang tải RustDesk MSI..."
+          Write-Host "Downloading RustDesk MSI..."
           $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
           $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
           
           curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $msiPath $url
           
-          if (-not (Test-Path $msiPath)) { throw "Tải RustDesk MSI thất bại." }
+          if (-not (Test-Path $msiPath)) { throw "Failed to download RustDesk MSI." }
           
-          Write-Host "Đang cài đặt ngầm qua msiexec..."
-          # Với MSI, dùng -Wait sẽ không bị treo như EXE
+          Write-Host "Installing RustDesk silently..."
           Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait -NoNewWindow
           
-          Write-Host "Đang chờ dịch vụ RustDesk khởi tạo..."
+          Write-Host "Waiting for RustDesk service to initialize..."
           Start-Sleep -Seconds 15
 
       # ============================================================
-      # STEP 3: CẤU HÌNH VÀ BẬT GIAO DIỆN RUSTDESK
+      # STEP 3: LAUNCH GUI AND GET ID
       # ============================================================
       - name: Configure RustDesk (GUI Mode)
         shell: powershell
@@ -98,27 +97,31 @@ jobs:
           if (-not (Test-Path $rustdeskExe)) {
               $rustdeskExe = "C:\Program Files (x86)\RustDesk\rustdesk.exe"
           }
-          if (-not (Test-Path $rustdeskExe)) { throw "Không tìm thấy file thực thi RustDesk." }
+          if (-not (Test-Path $rustdeskExe)) { throw "RustDesk executable not found." }
 
-          # Đảm bảo Service của RustDesk đã chạy
-          Write-Host "Đang khởi động dịch vụ RustDesk..."
+          Write-Host "Starting RustDesk Service..."
           Start-Service -Name "RustDesk" -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+          
+          Write-Host "Launching RustDesk GUI to force ID generation..."
+          # Bật GUI lên trước để nó kết nối tới server và tạo ID
+          Start-Process -FilePath $rustdeskExe -ArgumentList "--no-autoupdate"
+          Start-Sleep -Seconds 15
+          
+          Write-Host "Applying permanent password..."
+          & $rustdeskExe --password $env:RUSTDESK_PASS
           Start-Sleep -Seconds 5
           
-          Write-Host "Đang áp dụng mật khẩu..."
-          & $rustdeskExe --password $env:RUSTDESK_PASS
-          
-          Write-Host "Đang lấy ID RustDesk (có thể mất 1-2 phút)..."
+          Write-Host "Retrieving RustDesk ID (waiting for connection)..."
           $rustdeskId = $null
           $attempts = 0
-          # Tăng lên 20 lần thử, mỗi lần 5 giây
-          while (-not $rustdeskId -and $attempts -lt 20) {
+          
+          # Tăng lên 24 lần thử, mỗi lần 5 giây (tổng 2 phút)
+          while (-not $rustdeskId -and $attempts -lt 24) {
               $idOutput = (& $rustdeskExe --get-id 2>&1) | Out-String
               
-              # In ra log để debug nếu cần
-              Write-Host "Lần thử $($attempts+1): $($idOutput.Trim())"
+              Write-Host "Attempt $($attempts+1): $($idOutput.Trim())"
               
-              # Tìm bất kỳ dãy số nào từ 9-10 chữ số trong output
               if ($idOutput -match '(\d{9,10})') {
                   $rustdeskId = $matches[1]
                   break
@@ -129,21 +132,17 @@ jobs:
           }
           
           if (-not $rustdeskId) { 
-              throw "Không thể lấy ID RustDesk sau 20 lần thử. Vui lòng kiểm tra lại kết nối mạng của GitHub Runner." 
+              throw "Could not retrieve RustDesk ID after multiple attempts. The GitHub runner might be blocked by RustDesk public servers." 
           }
           
           Write-Host "======================================================="
-          Write-Host "ĐÃ LẤY ĐƯỢC ID: $rustdeskId"
+          Write-Host "RUSTDESK ID: $rustdeskId"
           Write-Host "======================================================="
           
           "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
-          
-          # KHỞI CHẠY GIAO DIỆN RUSTDESK
-          Write-Host "Đang mở giao diện RustDesk..."
-          Start-Process -FilePath $rustdeskExe -ArgumentList "--no-autoupdate"
 
       # ============================================================
-      # STEP 4: XUẤT THÔNG TIN KẾT NỐI
+      # STEP 4: PUBLISH CONNECTION DETAILS
       # ============================================================
       - name: Publish Connection Details
         shell: powershell
@@ -152,19 +151,19 @@ jobs:
           
           Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (RustDesk Full GUI)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### 🔑 Thông tin kết nối:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Connection Details:" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **RustDesk ID:** ``$env:RUSTDESK_ID``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Mật khẩu:** ``$env:RUSTDESK_PASS``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RUSTDESK_PASS``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "> **Note:** Đang chạy ở chế độ Full GUI. Màn hình sẽ không bị tắt." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "> **Note:** Running in Full GUI mode. Screen is kept awake." -Encoding utf8
 
       # ============================================================
-      # STEP 5: GIỮ SESSION SỐNG
+      # STEP 5: KEEP SESSION ALIVE
       # ============================================================
       - name: Keep session alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Đang chờ kết nối..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for connection..."
               Start-Sleep -Seconds 300
           }
