@@ -1,12 +1,7 @@
-name: ThyoCloud Workspace (Aspia Host & RDP Fallback)
+name: ThyoCloud Workspace (RustDesk for Friends)
 
 on:
   workflow_dispatch:
-    inputs:
-      customPassword:
-        description: 'RDP & Aspia Backup Password (Leave empty to auto-generate)'
-        required: false
-        default: ''
 
 jobs:
   deploy-workspace:
@@ -14,167 +9,52 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      # ============================================================
-      # STEP 1: SETUP RDP FALLBACK & WALLPAPER
-      # ============================================================
-      - name: Setup RDP Fallback & Wallpaper
-        shell: powershell
-        env:
-          RPASS_INPUT: ${{ github.event.inputs.customPassword }}
-        run: |
-          Write-Host "Setting up RDP fallback account..."
-          if ([string]::IsNullOrEmpty($env:RPASS_INPUT)) {
-              $upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
-              $lower = "abcdefghijkmnopqrstuvwxyz"
-              $digits = "23456789"
-              $special = "!@#$%^&*"
-              $pass = -join (1..4 | ForEach-Object { $special[(Get-Random -Maximum $special.Length)] })
-              $pass += -join (1..4 | ForEach-Object { $upper[(Get-Random -Maximum $upper.Length)] })
-              $pass += -join (1..2 | ForEach-Object { $digits[(Get-Random -Maximum $digits.Length)] })
-              $pass += -join (1..2 | ForEach-Object { $lower[(Get-Random -Maximum $lower.Length)] })
-              $RPASS = -join ($pass.ToCharArray() | Get-Random -Count $pass.Length)
-          } else { $RPASS = $env:RPASS_INPUT }
-          
-          net user Admin $RPASS /add
-          net localgroup "Administrators" Admin /add
-          net localgroup "Remote Desktop Users" Admin /add
-          Set-LocalUser -Name Admin -PasswordNeverExpires $true
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-
-          "RDP_USER=Admin" >> $env:GITHUB_ENV
-          "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
-
-          # Set Wallpaper
-          Write-Host "Setting up wallpaper..."
-          $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
-          if (Test-Path $LocalWallpaper) {
-              $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
-              Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
-              
-              $tsPolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-              New-Item -Path $tsPolicyPath -Force | Out-Null
-              Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
-              
-              $RegPath = "HKCU:\Control Panel\Desktop"
-              Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
-              Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
-              Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
-              
-              try {
-                  reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
-                  $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
-                  Set-ItemProperty -Path $DefaultRegPath -Name Wallpaper -Value $DestWallpaper
-                  Set-ItemProperty -Path $DefaultRegPath -Name WallpaperStyle -Value "10"
-                  Set-ItemProperty -Path $DefaultRegPath -Name TileWallpaper -Value "0"
-                  reg unload "HKU\DefaultUser" | Out-Null
-              } catch {}
-              
-              $csharpCode = 'using System; using System.Runtime.InteropServices; public class Wallpaper { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
-              Add-Type -TypeDefinition $csharpCode
-              [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
-              Write-Host "[SUCCESS] Wallpaper changed!"
-          }
-
-      # ============================================================
-      # STEP 2: INSTALL ASPIA HOST (SILENT)
-      # ============================================================
-      - name: Install Aspia Host
+      - name: Setup RustDesk
         shell: powershell
         run: |
-          Write-Host "Downloading Aspia Host..."
-          $msiUrl = "https://github.com/dchapyshev/aspia/releases/download/v2.7.0/aspia-host-2.7.0-x86_64.msi"
-          $msiPath = "$env:RUNNER_TEMP\aspia-host.msi"
-          
-          curl.exe -L --fail --retry 5 -o $msiPath $msiUrl
-          
-          if (-not (Test-Path $msiPath)) { throw "Failed to download Aspia Host MSI." }
-          
-          Write-Host "Installing Aspia Host silently..."
-          # Cài đặt silent qua msiexec
-          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /quiet /norestart" -Wait
-          
-          Write-Host "Aspia Host installed. Waiting for service..."
+          # Tạo mật khẩu ngẫu nhiên
+          $chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+          $RPASS = -join (1..8 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+          "RUSTDESK_PASS=$RPASS" >> $env:GITHUB_ENV
+
+          # Tải và cài đặt RustDesk
+          curl.exe -L --fail --retry 3 -o "$env:RUNNER_TEMP\rustdesk.exe" "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.exe"
+          Start-Process -FilePath "$env:RUNNER_TEMP\rustdesk.exe" -ArgumentList "--silent-install" -Wait
           Start-Sleep -Seconds 15
 
-      # ============================================================
-      # STEP 3: CONFIGURE ASPIA & GET HOST ID
-      # ============================================================
-      - name: Configure Aspia Host
-        shell: powershell
-        run: |
-          Write-Host "Configuring Aspia Host..."
-          $aspiaHostService = "C:\Program Files\Aspia\Host\aspia_host_service.exe"
-          $aspiaHostExe = "C:\Program Files\Aspia\Host\aspia_host.exe"
+          # Áp dụng mật khẩu và lấy ID
+          $rustdeskExe = "C:\Program Files\RustDesk\rustdesk.exe"
+          & $rustdeskExe --password $env:RUSTDESK_PASS
           
-          if (-not (Test-Path $aspiaHostService)) { throw "Aspia Host service not found." }
-
-          # Lấy Host ID (có thể cần chờ một chút để service khởi tạo)
-          Write-Host "Attempting to retrieve Aspia Host ID..."
-          $hostId = $null
+          $rustdeskId = $null
           $attempts = 0
-          while (-not $hostId -and $attempts -lt 10) {
-              $idOutput = & $aspiaHostService --host-id 2>&1
-              # Tìm ID trong output (có thể là một chuỗi số hoặc UUID)
-              if ($idOutput -match '(\d+)') {
-                  $hostId = $matches[1]
+          while (-not $rustdeskId -and $attempts -lt 15) {
+              $idOutput = & $rustdeskExe --get-id 2>&1
+              foreach ($line in $idOutput) {
+                  if (([string]$line).Trim() -match '^\d{9,10}$') {
+                      $rustdeskId = $matches[0]; break
+                  }
               }
-              if (-not $hostId) { Start-Sleep -Seconds 3 }
+              if (-not $rustdeskId) { Start-Sleep -Seconds 3 }
               $attempts++
           }
+          if (-not $rustdeskId) { throw "Failed to get ID." }
           
-          if ($hostId) {
-              Write-Host "Aspia Host ID: $hostId"
-              "ASPIA_HOST_ID=$hostId" >> $env:GITHUB_ENV
-          } else {
-              Write-Host "[WARNING] Could not retrieve Aspia Host ID automatically."
-              "ASPIA_HOST_ID=Unknown (Check logs)" >> $env:GITHUB_ENV
-          }
-
-          # Cấu hình user tĩnh (ví dụ: admin/admin) bằng cách import file JSON
-          # (Đây là cách duy nhất để tự động hóa mà không cần GUI)
-          Write-Host "Creating Aspia configuration with static user..."
-          $configJson = @"
-          {
-            "host": {
-              "users": [
-                {
-                  "username": "admin",
-                  "password": "$env:RDP_PASS",
-                  "sessions": ["desktop_manage"]
-                }
-              ],
-              "router": {
-                "address": "",
-                "public_key": ""
-              }
-            }
-          }
-          "@
-          $configPath = "$env:RUNNER_TEMP\aspia-host-config.json"
-          $configJson | Out-File -FilePath $configPath -Encoding utf8
+          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
           
-          # Import cấu hình
-          if (Test-Path $aspiaHostExe) {
-              & $aspiaHostExe --import=$configPath --silent
-              Write-Host "Aspia configuration imported."
-          } else {
-              Write-Host "[WARNING] aspia_host.exe not found. Cannot import config."
-          }
+          # Tắt giao diện để nhẹ máy
+          Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
 
-      # ============================================================
-      # STEP 4: KEEP SESSION ALIVE
-      # ============================================================
+      - name: Publish Connection Details
+        shell: powershell
+        run: |
+          $file = $env:GITHUB_STEP_SUMMARY
+          Add-Content -Path $file -Value "## Chia Sẻ Cho Bạn Bè (RustDesk)" -Encoding utf8
+          Add-Content -Path $file -Value "- **ID:** ``$env:RUSTDESK_ID``" -Encoding utf8
+          Add-Content -Path $file -Value "- **Password:** ``$env:RUSTDESK_PASS``" -Encoding utf8
+          Add-Content -Path $file -Value "**Hướng dẫn cho bạn bè:** Tải app RustDesk -> Nhập ID và Pass ở trên -> Kết nối." -Encoding utf8
+
       - name: Keep session alive
         shell: powershell
         run: |
-          Write-Host "Aspia Host & RDP fallback are running."
-          while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Aspia Host & RDP fallback running..."
-              Start-Sleep -Seconds 300
-          }
+          while ($true) { Start-Sleep -Seconds 300 }
