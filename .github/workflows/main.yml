@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (RDP + XyDesk Setup)
+name: ThyoCloud Workspace (XyDesk Host + Bore RDP)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # STEP 1: SETUP RDP ACCOUNT (Cần thiết để kết nối)
+      # STEP 1: SETUP RDP ACCOUNT
       # ============================================================
       - name: Setup RDP Account
         shell: powershell
@@ -26,79 +26,127 @@ jobs:
           net localgroup "Remote Desktop Users" Admin /add
           Set-LocalUser -Name Admin -PasswordNeverExpires $true
 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-
           "RDP_USER=Admin" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
       # ============================================================
-      # STEP 2: TÍCH HỢP SCRIPT XYDESK TỪ FILE .BAT CỦA BẠN
+      # STEP 2: CHẠY SCRIPT XYDESK-HOST.PS1 (TỐI ƯU HÓA RDP)
       # ============================================================
-      - name: Run XyDesk Optimization Script
+      - name: Apply XyDesk Host Optimizations
         shell: powershell
         run: |
-          Write-Host "Đang tải và chạy script tối ưu hóa từ XyDesk..."
-          # Sử dụng đúng đoạn mã PowerShell trong file .bat của bạn
-          $scriptBlock = {
-              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-              try { 
-                  irm https://xydeskremote.biz.id/onmic.ps1 | iex 
-              } catch { 
-                  Write-Host "Server chính lỗi, thử server dự phòng..."
-                  irm https://api.xydeskremote.biz.id/onmic.ps1 | iex 
-              }
+          Write-Host "Đang áp dụng cấu hình XyDesk Host (120Hz, AVC444, Audio/Mic)..."
+
+          $ErrorActionPreference = "SilentlyContinue"
+          
+          # Cấu hình Terminal Server cơ bản
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fSingleSessionPerUser" -Value 0
+          
+          # Cấu hình Policy
+          $tsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (!(Test-Path $tsPolicy)) { New-Item -Path $tsPolicy -Force | Out-Null }
+          
+          New-ItemProperty -Path $tsPolicy -Name "fDenyTSConnections" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "fSingleSessionPerUser" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "bEnumerateHWBeforeSW" -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "AVC444ModePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "AVCHardwareEncodePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "VGAdapter" -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "fAllowFontAntiAlias" -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "fAllowDesktopComposition" -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "SelectTransport" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "fDisableAudio" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "fDisableAudioCapture" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "fDisableCam" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "DWMFRAMEINTERVAL" -PropertyType DWord -Value 16 -Force | Out-Null
+          
+          # Cấu hình Audio
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDisableAudio" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDisableAudioCapture" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "fDisableAudio" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "fDisableAudioCapture" -PropertyType DWord -Value 0 -Force | Out-Null
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations" -Name "DWMFRAMEINTERVAL" -PropertyType DWord -Value 16 -Force | Out-Null
+          
+          # Cấu hình quyền Mic (Privacy)
+          foreach ($c in @(
+              "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone",
+              "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged",
+              "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone",
+              "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged"
+          )) {
+              if (-not (Test-Path $c)) { New-Item -Path $c -Force | Out-Null }
+              Set-ItemProperty -Path $c -Name "Value" -Value "Allow" -Force | Out-Null
           }
           
-          try {
-              & $scriptBlock
-              Write-Host "[SUCCESS] Đã chạy xong script tối ưu hóa."
-          } catch {
-              Write-Host "[WARNING] Không thể chạy script từ XyDesk (Có thể web của họ đang sập hoặc chặn IP GitHub)."
-          }
+          # Mở Firewall
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          netsh advfirewall firewall add rule name="XyDesk Remote RDP TCP" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          netsh advfirewall firewall add rule name="XyDesk Remote RDP UDP" dir=in action=allow protocol=UDP localport=3389 | Out-Null
+          netsh advfirewall firewall add rule name="XyDesk Remote QUIC UDP" dir=in action=allow protocol=UDP localport=4433 | Out-Null
+          
+          # Bật Service Âm thanh
+          Set-Service -Name "AudioEndpointBuilder" -StartupType Automatic
+          Start-Service -Name "AudioEndpointBuilder"
+          Set-Service -Name "Audiosrv" -StartupType Automatic
+          Start-Service -Name "Audiosrv"
+          Start-Service TermService
+          
+          Write-Host "[SUCCESS] XyDesk Host Ready (120Hz GPU AVC444 + ClearType + On-Mic AudioCapture + QUIC UDP 4433)"
 
       # ============================================================
-      # STEP 3: SET WALLPAPER (Giữ nguyên tính năng của bạn)
+      # STEP 3: CHẠY BORE TUNNEL (ĐỂ LẤY IP:PORT)
       # ============================================================
-      - name: Set Wallpaper
+      - name: Start Bore Tunnel
         shell: powershell
         run: |
-          Write-Host "Setting up wallpaper..."
-          $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
-          if (Test-Path $LocalWallpaper) {
-              $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
-              Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
-              
-              $tsPolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-              New-Item -Path $tsPolicyPath -Force | Out-Null
-              Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
-              
-              $RegPath = "HKCU:\Control Panel\Desktop"
-              Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
-              Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
-              Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
-              
-              $csharpCode = 'using System; using System.Runtime.InteropServices; public class Wallpaper { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
-              Add-Type -TypeDefinition $csharpCode
-              [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
+          Write-Host "Downloading bore..."
+          $boreZip = "$env:RUNNER_TEMP\bore.zip"
+          curl.exe -L --fail --retry 3 -o $boreZip "https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-pc-windows-msvc.zip"
+          Expand-Archive -Path $boreZip -DestinationPath "$env:RUNNER_TEMP\bore" -Force
+          
+          $boreExe = (Get-ChildItem -Path "$env:RUNNER_TEMP\bore" -Filter "bore.exe" -Recurse | Select-Object -First 1).FullName
+          
+          Write-Host "Starting bore tunnel for RDP (port 3389)..."
+          $logFile = "$env:RUNNER_TEMP\bore.log"
+          Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput $logFile -WindowStyle Hidden
+          
+          Write-Host "Waiting for bore to assign a public port..."
+          $boreAddress = $null
+          $attempts = 0
+          while (-not $boreAddress -and $attempts -lt 20) {
+              Start-Sleep -Seconds 2
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+                  if ($content -match 'bore\.pub:(\d+)') {
+                      $boreAddress = "bore.pub:$($matches[1])"
+                  }
+              }
+              $attempts++
           }
+          
+          if (-not $boreAddress) { throw "Failed to get bore address." }
+          "BORE_ADDR=$boreAddress" >> $env:GITHUB_ENV
 
       # ============================================================
-      # STEP 4: XUẤT THÔNG TIN KẾT NỐI RDP
+      # STEP 4: XUẤT THÔNG TIN KẾT NỐI
       # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Tối ưu hóa XyDesk)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (XyDesk Optimized)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### 🔑 Thông tin RDP:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### 🔑 Thông tin kết nối RDP:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Address (IP:Port):** ``$env:BORE_ADDR``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "> **Lưu ý:** Script XyDesk đã được tích hợp. Bạn cần dùng Tunnel (như Ngrok/Bore) để lấy IP:Port kết nối vào RDP." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### 📖 Hướng dẫn:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Mở **Remote Desktop Connection** (mstsc)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Nhập địa chỉ ``$env:BORE_ADDR`` vào ô Computer." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "3. Nhập Username và Password ở trên." -Encoding utf8
 
       # ============================================================
       # STEP 5: GIỮ SESSION SỐNG
@@ -107,6 +155,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Đang chờ kết nối..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for RDP connection..."
               Start-Sleep -Seconds 300
           }
