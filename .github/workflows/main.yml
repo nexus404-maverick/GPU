@@ -30,20 +30,18 @@ jobs:
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
       # ============================================================
-      # STEP 2: CHẠY SCRIPT XYDESK-HOST.PS1 (TỐI ƯU HÓA RDP)
+      # STEP 2: APPLY XYDESK-HOST OPTIMIZATIONS
       # ============================================================
       - name: Apply XyDesk Host Optimizations
         shell: powershell
         run: |
-          Write-Host "Đang áp dụng cấu hình XyDesk Host (120Hz, AVC444, Audio/Mic)..."
+          Write-Host "Applying XyDesk Host settings (120Hz, AVC444, Audio/Mic)..."
 
           $ErrorActionPreference = "SilentlyContinue"
           
-          # Cấu hình Terminal Server cơ bản
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fSingleSessionPerUser" -Value 0
           
-          # Cấu hình Policy
           $tsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           if (!(Test-Path $tsPolicy)) { New-Item -Path $tsPolicy -Force | Out-Null }
           
@@ -61,14 +59,12 @@ jobs:
           New-ItemProperty -Path $tsPolicy -Name "fDisableCam" -PropertyType DWord -Value 0 -Force | Out-Null
           New-ItemProperty -Path $tsPolicy -Name "DWMFRAMEINTERVAL" -PropertyType DWord -Value 16 -Force | Out-Null
           
-          # Cấu hình Audio
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDisableAudio" -PropertyType DWord -Value 0 -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDisableAudioCapture" -PropertyType DWord -Value 0 -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "fDisableAudio" -PropertyType DWord -Value 0 -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "fDisableAudioCapture" -PropertyType DWord -Value 0 -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations" -Name "DWMFRAMEINTERVAL" -PropertyType DWord -Value 16 -Force | Out-Null
           
-          # Cấu hình quyền Mic (Privacy)
           foreach ($c in @(
               "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone",
               "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged",
@@ -79,23 +75,21 @@ jobs:
               Set-ItemProperty -Path $c -Name "Value" -Value "Allow" -Force | Out-Null
           }
           
-          # Mở Firewall
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           netsh advfirewall firewall add rule name="XyDesk Remote RDP TCP" dir=in action=allow protocol=TCP localport=3389 | Out-Null
           netsh advfirewall firewall add rule name="XyDesk Remote RDP UDP" dir=in action=allow protocol=UDP localport=3389 | Out-Null
           netsh advfirewall firewall add rule name="XyDesk Remote QUIC UDP" dir=in action=allow protocol=UDP localport=4433 | Out-Null
           
-          # Bật Service Âm thanh
           Set-Service -Name "AudioEndpointBuilder" -StartupType Automatic
           Start-Service -Name "AudioEndpointBuilder"
           Set-Service -Name "Audiosrv" -StartupType Automatic
           Start-Service -Name "Audiosrv"
           Start-Service TermService
           
-          Write-Host "[SUCCESS] XyDesk Host Ready (120Hz GPU AVC444 + ClearType + On-Mic AudioCapture + QUIC UDP 4433)"
+          Write-Host "[SUCCESS] XyDesk Host Optimized!"
 
       # ============================================================
-      # STEP 3: CHẠY BORE TUNNEL (ĐỂ LẤY IP:PORT)
+      # STEP 3: START BORE TUNNEL
       # ============================================================
       - name: Start Bore Tunnel
         shell: powershell
@@ -129,27 +123,28 @@ jobs:
           "BORE_ADDR=$boreAddress" >> $env:GITHUB_ENV
 
       # ============================================================
-      # STEP 4: XUẤT THÔNG TIN KẾT NỐI
+      # STEP 4: PUBLISH CONNECTION DETAILS (SAFE STRING CONCATENATION)
       # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           
+          # Sử dụng nối chuỗi (+) thay vì nội suy (``) để tránh lỗi ký tự đặc biệt
           Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (XyDesk Optimized)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### 🔑 Thông tin kết nối RDP:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Address (IP:Port):** ``$env:BORE_ADDR``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Username:** ``$env:RDP_USER``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Connection Details:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **Address:** " + $env:BORE_ADDR) -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **Username:** " + $env:RDP_USER) -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **Password:** " + $env:RDP_PASS) -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### 📖 Hướng dẫn:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "1. Mở **Remote Desktop Connection** (mstsc)." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. Nhập địa chỉ ``$env:BORE_ADDR`` vào ô Computer." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "3. Nhập Username và Password ở trên." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Open Remote Desktop Connection (mstsc)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("2. Enter the Address: " + $env:BORE_ADDR + " in the Computer field.") -Encoding utf8
+          Add-Content -Path $summaryFile -Value "3. Enter the Username and Password above." -Encoding utf8
 
       # ============================================================
-      # STEP 5: GIỮ SESSION SỐNG
+      # STEP 5: KEEP SESSION ALIVE
       # ============================================================
       - name: Keep session alive
         shell: powershell
