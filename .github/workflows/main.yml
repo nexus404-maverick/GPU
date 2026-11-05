@@ -30,9 +30,9 @@ jobs:
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
       # ============================================================
-      # STEP 2: APPLY XYDESK-HOST OPTIMIZATIONS
+      # STEP 2: APPLY XYDESK OPTIMIZATIONS & DISABLE FIREWALL
       # ============================================================
-      - name: Apply XyDesk Host Optimizations
+      - name: Apply XyDesk Optimizations & Disable Firewall
         shell: powershell
         run: |
           Write-Host "Applying XyDesk Host settings (120Hz, AVC444, Audio/Mic)..."
@@ -75,10 +75,16 @@ jobs:
               Set-ItemProperty -Path $c -Name "Value" -Value "Allow" -Force | Out-Null
           }
           
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          netsh advfirewall firewall add rule name="XyDesk Remote RDP TCP" dir=in action=allow protocol=TCP localport=3389 | Out-Null
-          netsh advfirewall firewall add rule name="XyDesk Remote RDP UDP" dir=in action=allow protocol=UDP localport=3389 | Out-Null
-          netsh advfirewall firewall add rule name="XyDesk Remote QUIC UDP" dir=in action=allow protocol=UDP localport=4433 | Out-Null
+          # ---------------------------------------------------------
+          # TẮT HOÀN TOÀN TƯỜNG LỬA (Tránh bị chặn kết nối RDP)
+          # ---------------------------------------------------------
+          Write-Host "Disabling Windows Firewall for all profiles..."
+          Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
+          
+          # Mở cổng RDP và QUIC (Dự phòng nếu Firewall không tắt được)
+          netsh advfirewall firewall add rule name="RDP All Profiles" dir=in action=allow protocol=TCP localport=3389 profile=any | Out-Null
+          netsh advfirewall firewall add rule name="RDP UDP All Profiles" dir=in action=allow protocol=UDP localport=3389 profile=any | Out-Null
+          netsh advfirewall firewall add rule name="QUIC UDP All Profiles" dir=in action=allow protocol=UDP localport=4433 profile=any | Out-Null
           
           Set-Service -Name "AudioEndpointBuilder" -StartupType Automatic
           Start-Service -Name "AudioEndpointBuilder"
@@ -86,7 +92,7 @@ jobs:
           Start-Service -Name "Audiosrv"
           Start-Service TermService
           
-          Write-Host "[SUCCESS] XyDesk Host Optimized!"
+          Write-Host "[SUCCESS] XyDesk Optimized & Firewall Disabled!"
 
       # ============================================================
       # STEP 3: DOWNLOAD AND RUN ANYWARELAN (HEADLESS)
@@ -95,7 +101,6 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Downloading Anywherelan (headless)..."
-          # Sử dụng phiên bản mới nhất của awl
           $awlUrl = "https://github.com/anywherelan/awl/releases/download/v0.20.0/awl-windows-amd64-v0.20.0.zip"
           $awlZip = "$env:RUNNER_TEMP\awl.zip"
           curl.exe -L --fail -o $awlZip $awlUrl
@@ -109,7 +114,6 @@ jobs:
           if (-not (Test-Path $awlExe)) { throw "awl.exe not found after extraction." }
           
           Write-Host "Starting Anywherelan in the background..."
-          # Chạy awl headless (không GUI)
           Start-Process -FilePath $awlExe -WindowStyle Hidden
           
           Write-Host "Waiting for Anywherelan to initialize..."
@@ -124,7 +128,6 @@ jobs:
           $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
           
           Write-Host "Getting Peer ID..."
-          # Lệnh lấy Peer ID theo tài liệu chính thức
           $peerId = (& $awlExe cli me id 2>&1) | Out-String
           $peerId = $peerId.Trim()
           
@@ -139,7 +142,6 @@ jobs:
           "AWL_PEER_ID=$peerId" >> $env:GITHUB_ENV
           
           Write-Host "Getting VPN IP Address..."
-          # Dải mạng mặc định của Anywherelan là 10.66.0.1/24
           $vpnIp = $null
           $attempts = 0
           while (-not $vpnIp -and $attempts -lt 10) {
@@ -203,12 +205,11 @@ jobs:
           Add-Content -Path $summaryFile -Value ("- **Peer ID:** " + $env:AWL_PEER_ID) -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "1. Mở Anywherelan (awl-tray) trên máy tính của bạn." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. Mở Web UI (http://admin.awl)." -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("3. Thêm Peer ID của máy ảo: " + $env:AWL_PEER_ID) -Encoding utf8
-          Add-Content -Path $summaryFile -Value "4. Mở Remote Desktop Connection (mstsc)." -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("5. Nhập IP: " + $env:AWL_IP + " vào ô Computer.") -Encoding utf8
-          Add-Content -Path $summaryFile -Value "6. Nhập Username và Password ở trên." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Mở Anywherelan (awl-tray) trên thiết bị của bạn." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Thêm Peer ID của máy ảo ở trên." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "3. Mở Remote Desktop Connection (mstsc / RD Client)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("4. Nhập IP: " + $env:AWL_IP) -Encoding utf8
+          Add-Content -Path $summaryFile -Value "5. Nhập Username và Password ở trên." -Encoding utf8
 
       # ============================================================
       # STEP 7: KEEP SESSION ALIVE
