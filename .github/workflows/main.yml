@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (XyDesk Host + Bore RDP)
+name: ThyoCloud Workspace (Anywherelan P2P RDP)
 
 on:
   workflow_dispatch:
@@ -89,67 +89,134 @@ jobs:
           Write-Host "[SUCCESS] XyDesk Host Optimized!"
 
       # ============================================================
-      # STEP 3: START BORE TUNNEL
+      # STEP 3: DOWNLOAD AND RUN ANYWARELAN (HEADLESS)
       # ============================================================
-      - name: Start Bore Tunnel
+      - name: Download and Start Anywherelan (awl)
         shell: powershell
         run: |
-          Write-Host "Downloading bore..."
-          $boreZip = "$env:RUNNER_TEMP\bore.zip"
-          curl.exe -L --fail --retry 3 -o $boreZip "https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-pc-windows-msvc.zip"
-          Expand-Archive -Path $boreZip -DestinationPath "$env:RUNNER_TEMP\bore" -Force
+          Write-Host "Downloading Anywherelan (headless)..."
+          # Sử dụng phiên bản mới nhất của awl
+          $awlUrl = "https://github.com/anywherelan/awl/releases/download/v0.20.0/awl-windows-amd64-v0.20.0.zip"
+          $awlZip = "$env:RUNNER_TEMP\awl.zip"
+          curl.exe -L --fail -o $awlZip $awlUrl
           
-          $boreExe = (Get-ChildItem -Path "$env:RUNNER_TEMP\bore" -Filter "bore.exe" -Recurse | Select-Object -First 1).FullName
+          if (-not (Test-Path $awlZip)) { throw "Failed to download Anywherelan." }
           
-          Write-Host "Starting bore tunnel for RDP (port 3389)..."
-          $logFile = "$env:RUNNER_TEMP\bore.log"
-          Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput $logFile -WindowStyle Hidden
+          Write-Host "Extracting Anywherelan..."
+          Expand-Archive -Path $awlZip -DestinationPath "$env:RUNNER_TEMP\awl" -Force
+          $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
           
-          Write-Host "Waiting for bore to assign a public port..."
-          $boreAddress = $null
-          $attempts = 0
-          while (-not $boreAddress -and $attempts -lt 20) {
-              Start-Sleep -Seconds 2
-              if (Test-Path $logFile) {
-                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-                  if ($content -match 'bore\.pub:(\d+)') {
-                      $boreAddress = "bore.pub:$($matches[1])"
-                  }
-              }
-              $attempts++
-          }
+          if (-not (Test-Path $awlExe)) { throw "awl.exe not found after extraction." }
           
-          if (-not $boreAddress) { throw "Failed to get bore address." }
-          "BORE_ADDR=$boreAddress" >> $env:GITHUB_ENV
+          Write-Host "Starting Anywherelan in the background..."
+          # Chạy awl headless (không GUI)
+          Start-Process -FilePath $awlExe -WindowStyle Hidden
+          
+          Write-Host "Waiting for Anywherelan to initialize..."
+          Start-Sleep -Seconds 20
 
       # ============================================================
-      # STEP 4: PUBLISH CONNECTION DETAILS (SAFE STRING CONCATENATION)
+      # STEP 4: GET ANYWARELAN PEER ID AND VPN IP
+      # ============================================================
+      - name: Get Anywherelan Peer ID and IP
+        shell: powershell
+        run: |
+          $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
+          
+          Write-Host "Getting Peer ID..."
+          # Lệnh lấy Peer ID theo tài liệu chính thức
+          $peerId = (& $awlExe cli me id 2>&1) | Out-String
+          $peerId = $peerId.Trim()
+          
+          if (-not $peerId) {
+              Write-Host "[WARNING] Could not retrieve Peer ID. Retrying..."
+              Start-Sleep -Seconds 10
+              $peerId = (& $awlExe cli me id 2>&1) | Out-String
+              $peerId = $peerId.Trim()
+          }
+          
+          Write-Host "Peer ID: $peerId"
+          "AWL_PEER_ID=$peerId" >> $env:GITHUB_ENV
+          
+          Write-Host "Getting VPN IP Address..."
+          # Dải mạng mặc định của Anywherelan là 10.66.0.1/24
+          $vpnIp = $null
+          $attempts = 0
+          while (-not $vpnIp -and $attempts -lt 10) {
+              $vpnIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -like "10.66.*" }).IPAddress
+              if (-not $vpnIp) {
+                  Start-Sleep -Seconds 3
+                  $attempts++
+              }
+          }
+          
+          if ($vpnIp) {
+              Write-Host "VPN IP: $vpnIp"
+              "AWL_IP=$vpnIp" >> $env:GITHUB_ENV
+          } else {
+              Write-Host "[WARNING] Could not determine VPN IP automatically."
+              "AWL_IP=Unknown (check logs)" >> $env:GITHUB_ENV
+          }
+
+      # ============================================================
+      # STEP 5: SET WALLPAPER
+      # ============================================================
+      - name: Set Wallpaper
+        shell: powershell
+        run: |
+          Write-Host "Setting up wallpaper..."
+          $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
+          if (Test-Path $LocalWallpaper) {
+              $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
+              Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
+              
+              $tsPolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+              New-Item -Path $tsPolicyPath -Force | Out-Null
+              Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
+              
+              $RegPath = "HKCU:\Control Panel\Desktop"
+              Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
+              Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
+              Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
+              
+              $csharpCode = 'using System; using System.Runtime.InteropServices; public class Wallpaper { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
+              Add-Type -TypeDefinition $csharpCode
+              [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
+          }
+
+      # ============================================================
+      # STEP 6: PUBLISH CONNECTION DETAILS
       # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           
-          # Sử dụng nối chuỗi (+) thay vì nội suy (``) để tránh lỗi ký tự đặc biệt
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (XyDesk Optimized)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Anywherelan P2P)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Connection Details:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("- **Address:** " + $env:BORE_ADDR) -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **VPN IP (Dùng IP này để kết nối):** " + $env:AWL_IP) -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **Username:** " + $env:RDP_USER) -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **Password:** " + $env:RDP_PASS) -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Peer ID của máy ảo:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **Peer ID:** " + $env:AWL_PEER_ID) -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### How to connect:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "1. Open Remote Desktop Connection (mstsc)." -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("2. Enter the Address: " + $env:BORE_ADDR + " in the Computer field.") -Encoding utf8
-          Add-Content -Path $summaryFile -Value "3. Enter the Username and Password above." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Mở Anywherelan (awl-tray) trên máy tính của bạn." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Mở Web UI (http://admin.awl)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("3. Thêm Peer ID của máy ảo: " + $env:AWL_PEER_ID) -Encoding utf8
+          Add-Content -Path $summaryFile -Value "4. Mở Remote Desktop Connection (mstsc)." -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("5. Nhập IP: " + $env:AWL_IP + " vào ô Computer.") -Encoding utf8
+          Add-Content -Path $summaryFile -Value "6. Nhập Username và Password ở trên." -Encoding utf8
 
       # ============================================================
-      # STEP 5: KEEP SESSION ALIVE
+      # STEP 7: KEEP SESSION ALIVE
       # ============================================================
       - name: Keep session alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for RDP connection..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via Anywherelan..."
               Start-Sleep -Seconds 300
           }
