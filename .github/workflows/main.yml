@@ -13,20 +13,16 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # STEP 1: SETUP RDP ACCOUNT (FIXED PASSWORD)
+      # STEP 1: SETUP RDP ACCOUNT
       # ============================================================
       - name: Setup RDP Account
         shell: powershell
         run: |
-          Write-Host "Setting up RDP account with fixed password..."
+          Write-Host "Setting up RDP account..."
           $RPASS = "P@ssw0rd!"
           
           $userExists = Get-LocalUser -Name "Admin" -ErrorAction SilentlyContinue
-          if (-not $userExists) {
-              net user Admin $RPASS /add
-          } else {
-              Set-LocalUser -Name Admin -Password (ConvertTo-SecureString $RPASS -AsPlainText -Force)
-          }
+          if (-not $userExists) { net user Admin $RPASS /add }
           
           net localgroup "Administrators" Admin /add 2>$null
           net localgroup "Remote Desktop Users" Admin /add 2>$null
@@ -53,31 +49,18 @@ jobs:
           New-ItemProperty -Path $tsPolicy -Name "AVC444ModePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
           New-ItemProperty -Path $tsPolicy -Name "AVCHardwareEncodePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
           New-ItemProperty -Path $tsPolicy -Name "DWMFRAMEINTERVAL" -PropertyType DWord -Value 16 -Force | Out-Null
-          New-ItemProperty -Path $tsPolicy -Name "fDisableAudio" -PropertyType DWord -Value 0 -Force | Out-Null
-          New-ItemProperty -Path $tsPolicy -Name "fDisableAudioCapture" -PropertyType DWord -Value 0 -Force | Out-Null
-          
-          foreach ($c in @(
-              "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone",
-              "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged"
-          )) {
-              if (-not (Test-Path $c)) { New-Item -Path $c -Force | Out-Null }
-              Set-ItemProperty -Path $c -Name "Value" -Value "Allow" -Force | Out-Null
-          }
           
           # Tắt tường lửa hoàn toàn
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
           netsh advfirewall firewall add rule name="RDP All Profiles" dir=in action=allow protocol=TCP localport=3389 profile=any | Out-Null
           
-          Set-Service -Name "AudioEndpointBuilder" -StartupType Automatic
-          Start-Service -Name "AudioEndpointBuilder"
           Set-Service -Name "Audiosrv" -StartupType Automatic
           Start-Service -Name "Audiosrv"
           Start-Service TermService
-          
           Write-Host "[SUCCESS] Optimized & Firewall Disabled!"
 
       # ============================================================
-      # STEP 3: DOWNLOAD AND RUN ANYWARELAN (HEADLESS)
+      # STEP 3: DOWNLOAD AND RUN ANYWARELAN
       # ============================================================
       - name: Download and Start Anywherelan (awl)
         shell: powershell
@@ -90,14 +73,12 @@ jobs:
           Expand-Archive -Path $awlZip -DestinationPath "$env:RUNNER_TEMP\awl" -Force
           $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
           
-          Write-Host "Starting Anywherelan in the background..."
+          Write-Host "Starting Anywherelan..."
           Start-Process -FilePath $awlExe -WindowStyle Hidden
-          
-          Write-Host "Waiting for Anywherelan to initialize..."
           Start-Sleep -Seconds 20
 
       # ============================================================
-      # STEP 4: GET PEER ID, IP AND AUTO-ACCEPT PEERS
+      # STEP 4: LẤY THÔNG TIN & TỰ ĐỘNG CHẤP NHẬN (AUTO-ACCEPT)
       # ============================================================
       - name: Get Peer Info & Start Auto-Accept Job
         shell: powershell
@@ -114,52 +95,39 @@ jobs:
                   $peerId = $matches[1].Trim()
                   break
               }
-              $configPaths = @("$env:APPDATA\anywherelan\config_awl.json", "$env:LOCALAPPDATA\anywherelan\config_awl.json")
-              foreach ($cfg in $configPaths) {
-                  if (Test-Path $cfg) {
-                      try {
-                          $json = Get-Content $cfg -Raw | ConvertFrom-Json
-                          if ($json.p2pNode -and $json.p2pNode.peerId) {
-                              $peerId = $json.p2pNode.peerId; break
-                          }
-                      } catch {}
-                  }
-              }
-              if (-not $peerId) { Start-Sleep -Seconds 2; $attempts++ }
+              Start-Sleep -Seconds 2; $attempts++
           }
           Write-Host "PEER ID: $peerId"
           "AWL_PEER_ID=$peerId" >> $env:GITHUB_ENV
 
-          # 2. Lấy IP VPN thực tế được cấp
+          # 2. Lấy IP VPN (10.66.0.x)
           Write-Host "=== EXTRACTING VPN IP ==="
-          $vpnIp = "10.66.0.1" # Mặc định
+          $vpnIp = "10.66.0.2" # Dự phòng
           $meOutput = (& $awlExe cli me 2>&1) | Out-String
-          if ($meOutput -match 'IP:\s*([0-9\.]+)') {
-              $vpnIp = $matches[1]
-          }
+          if ($meOutput -match 'IP:\s*([0-9\.]+)') { $vpnIp = $matches[1] }
           Write-Host "VPN IP: $vpnIp"
           "AWL_IP=$vpnIp" >> $env:GITHUB_ENV
 
-          # 3. TẠO BACKGROUND JOB TỰ ĐỘNG CHẤP NHẬN PEER
-          Write-Host "=== STARTING AUTO-ACCEPT BACKGROUND JOB ==="
+          # 3. TẠO JOB TỰ ĐỘNG CHẤP NHẬN (ĐÃ FIX)
+          Write-Host "=== STARTING AUTO-ACCEPT JOB ==="
           Start-Job -ScriptBlock {
               param($exe)
               while ($true) {
                   try {
-                      # Lấy danh sách peer hiện tại
+                      # Quét danh sách peer
                       $peersOutput = & $exe cli peers 2>&1 | Out-String
-                      # Tìm tất cả các chuỗi ID hợp lệ trong output
+                      # Tìm tất cả ID bắt đầu bằng 12D3KooW
                       $matches = [regex]::Matches($peersOutput, '(12D3KooW[a-zA-Z0-9]+)')
                       foreach ($match in $matches) {
                           $id = $match.Groups[1].Value
-                          # Thử chấp nhận (nếu đã chấp nhận rồi, lệnh sẽ lặng lẽ bỏ qua)
+                          # Thử chấp nhận (thêm cờ --yes nếu cần)
                           & $exe cli peers accept $id 2>&1 | Out-Null
                       }
                   } catch {}
                   Start-Sleep -Seconds 5
               }
           } -ArgumentList $awlExe
-          Write-Host "Auto-accept job started successfully!"
+          Write-Host "Auto-accept job started!"
 
       # ============================================================
       # STEP 5: PUBLISH CONNECTION DETAILS
@@ -171,21 +139,11 @@ jobs:
           
           Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Anywherelan P2P)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### 1. Mã Peer ID (Nhập vào App Anywherelan trên Điện thoại):" -Encoding utf8
-          
-          if ([string]::IsNullOrEmpty($env:AWL_PEER_ID)) {
-              Add-Content -Path $summaryFile -Value "- **CẢNH BÁO:** Không lấy được Peer ID. Hãy thử chạy lại workflow." -Encoding utf8
-          } else {
-              Add-Content -Path $summaryFile -Value ("- **Peer ID:** ``" + $env:AWL_PEER_ID + "``") -Encoding utf8
-          }
-          
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### 2. Thông tin kết nối RDP (Nhập vào App Remote Desktop):" -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("- **IP:** ``" + $env:AWL_IP + "``") -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Thông tin kết nối:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **Peer ID:** ``" + $env:AWL_PEER_ID + "``") -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **IP (Điền vào app RDP):** ``" + $env:AWL_IP + ":3389" + "``") -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **Username:** ``" + $env:RDP_USER + "``") -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **Password:** ``" + $env:RDP_PASS + "``") -Encoding utf8
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "> **LƯU Ý:** Máy ảo đã được cấu hình để **TỰ ĐỘNG CHẤP NHẬN** mọi kết nối từ điện thoại của bạn." -Encoding utf8
 
       # ============================================================
       # STEP 6: KEEP SESSION ALIVE
@@ -194,6 +152,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for connection via Anywherelan..."
+              Write-Host "[$(Get-Date)] Session Active - Waiting for connection..."
               Start-Sleep -Seconds 300
           }
