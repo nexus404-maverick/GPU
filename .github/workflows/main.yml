@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (Anywherelan P2P RDP - Auto Accept)
+name: ThyoCloud Workspace (Anywherelan P2P RDP - Debug)
 
 on:
   workflow_dispatch:
@@ -18,16 +18,11 @@ jobs:
       - name: Setup RDP Account
         shell: powershell
         run: |
-          Write-Host "Setting up RDP account..."
           $RPASS = "P@ssw0rd!"
-          
-          $userExists = Get-LocalUser -Name "Admin" -ErrorAction SilentlyContinue
-          if (-not $userExists) { net user Admin $RPASS /add }
-          
+          net user Admin $RPASS /add
           net localgroup "Administrators" Admin /add 2>$null
           net localgroup "Remote Desktop Users" Admin /add 2>$null
           Set-LocalUser -Name Admin -PasswordNeverExpires $true
-
           "RDP_USER=Admin" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
@@ -37,27 +32,11 @@ jobs:
       - name: Apply XyDesk Optimizations & Disable Firewall
         shell: powershell
         run: |
-          Write-Host "Applying XyDesk Host settings..."
-          $ErrorActionPreference = "SilentlyContinue"
-          
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fSingleSessionPerUser" -Value 0
-          
-          $tsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-          if (!(Test-Path $tsPolicy)) { New-Item -Path $tsPolicy -Force | Out-Null }
-          
-          New-ItemProperty -Path $tsPolicy -Name "AVC444ModePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
-          New-ItemProperty -Path $tsPolicy -Name "AVCHardwareEncodePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
-          New-ItemProperty -Path $tsPolicy -Name "DWMFRAMEINTERVAL" -PropertyType DWord -Value 16 -Force | Out-Null
-          
-          # Tắt tường lửa hoàn toàn
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
           netsh advfirewall firewall add rule name="RDP All Profiles" dir=in action=allow protocol=TCP localport=3389 profile=any | Out-Null
-          
-          Set-Service -Name "Audiosrv" -StartupType Automatic
-          Start-Service -Name "Audiosrv"
           Start-Service TermService
-          Write-Host "[SUCCESS] Optimized & Firewall Disabled!"
 
       # ============================================================
       # STEP 3: DOWNLOAD AND RUN ANYWARELAN
@@ -65,69 +44,64 @@ jobs:
       - name: Download and Start Anywherelan (awl)
         shell: powershell
         run: |
-          Write-Host "Downloading Anywherelan (headless)..."
           $awlUrl = "https://github.com/anywherelan/awl/releases/download/v0.20.0/awl-windows-amd64-v0.20.0.zip"
           $awlZip = "$env:RUNNER_TEMP\awl.zip"
           curl.exe -L --fail -o $awlZip $awlUrl
-          
           Expand-Archive -Path $awlZip -DestinationPath "$env:RUNNER_TEMP\awl" -Force
           $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
-          
-          Write-Host "Starting Anywherelan..."
           Start-Process -FilePath $awlExe -WindowStyle Hidden
-          Start-Sleep -Seconds 20
+          Write-Host "Waiting for Anywherelan to initialize (30s)..."
+          Start-Sleep -Seconds 30
 
       # ============================================================
-      # STEP 4: LẤY THÔNG TIN & TỰ ĐỘNG CHẤP NHẬN (AUTO-ACCEPT)
+      # STEP 4: GET PEER ID (DEBUG MODE)
       # ============================================================
       - name: Get Peer Info & Start Auto-Accept Job
         shell: powershell
         run: |
           $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
           
-          # 1. Lấy Peer ID
-          Write-Host "=== EXTRACTING PEER ID ==="
+          Write-Host "=== IN TOÀN BỘ OUTPUT CỦA 'awl status' ĐỂ TÌM ID ==="
+          $statusOutput = (& $awlExe status 2>&1) | Out-String
+          Write-Host $statusOutput
+          
+          Write-Host "=== IN TOÀN BỘ OUTPUT CỦA 'awl cli me' ==="
+          $cliOutput = (& $awlExe cli me 2>&1) | Out-String
+          Write-Host $cliOutput
+
+          # Cố gắng tự động trích xuất ID bằng Regex mạnh hơn
           $peerId = $null
-          $attempts = 0
-          while ((-not $peerId) -and ($attempts -lt 15)) {
-              $cliOutput = (& $awlExe cli me id 2>&1) | Out-String
-              if ($cliOutput -match '(12D3KooW[a-zA-Z0-9]+)') {
-                  $peerId = $matches[1].Trim()
-                  break
-              }
-              Start-Sleep -Seconds 2; $attempts++
+          if ($statusOutput -match '(12D3KooW[a-zA-Z0-9]+)') {
+              $peerId = $matches[1]
+          } elseif ($cliOutput -match '(12D3KooW[a-zA-Z0-9]+)') {
+              $peerId = $matches[1]
           }
-          Write-Host "PEER ID: $peerId"
+
+          Write-Host "======================================================="
+          Write-Host "TỰ ĐỘNG TRÍCH XUẤT ĐƯỢC PEER ID: $peerId"
+          Write-Host "======================================================="
+
           "AWL_PEER_ID=$peerId" >> $env:GITHUB_ENV
 
-          # 2. Lấy IP VPN (10.66.0.x)
-          Write-Host "=== EXTRACTING VPN IP ==="
-          $vpnIp = "10.66.0.2" # Dự phòng
-          $meOutput = (& $awlExe cli me 2>&1) | Out-String
-          if ($meOutput -match 'IP:\s*([0-9\.]+)') { $vpnIp = $matches[1] }
-          Write-Host "VPN IP: $vpnIp"
+          # Lấy IP VPN
+          $vpnIp = "10.66.0.2"
+          if ($statusOutput -match 'IP:\s*([0-9\.]+)') { $vpnIp = $matches[1] }
           "AWL_IP=$vpnIp" >> $env:GITHUB_ENV
 
-          # 3. TẠO JOB TỰ ĐỘNG CHẤP NHẬN (ĐÃ FIX)
-          Write-Host "=== STARTING AUTO-ACCEPT JOB ==="
+          # Chạy Auto-Accept Job
           Start-Job -ScriptBlock {
               param($exe)
               while ($true) {
                   try {
-                      # Quét danh sách peer
                       $peersOutput = & $exe cli peers 2>&1 | Out-String
-                      # Tìm tất cả ID bắt đầu bằng 12D3KooW
                       $matches = [regex]::Matches($peersOutput, '(12D3KooW[a-zA-Z0-9]+)')
                       foreach ($match in $matches) {
-                          $id = $match.Groups[1].Value
-                          # Thử chấp nhận (thêm cờ --yes nếu cần)
-                          & $exe cli peers accept $id 2>&1 | Out-Null
+                          & $exe cli peers accept $match.Groups[1].Value 2>&1 | Out-Null
                       }
                   } catch {}
                   Start-Sleep -Seconds 5
               }
           } -ArgumentList $awlExe
-          Write-Host "Auto-accept job started!"
 
       # ============================================================
       # STEP 5: PUBLISH CONNECTION DETAILS
@@ -136,12 +110,15 @@ jobs:
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Anywherelan)" -Encoding utf8
           
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Anywherelan P2P)" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### Thông tin kết nối:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("- **Peer ID:** ``" + $env:AWL_PEER_ID + "``") -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("- **IP (Điền vào app RDP):** ``" + $env:AWL_IP + ":3389" + "``") -Encoding utf8
+          if ([string]::IsNullOrEmpty($env:AWL_PEER_ID)) {
+              Add-Content -Path $summaryFile -Value "**CẢNH BÁO:** Không tự động lấy được Peer ID. Bạn phải mở log của bước 'Get Peer Info & Start Auto-Accept Job', tìm chuỗi bắt đầu bằng ``12D3KooW...`` và copy thủ công." -Encoding utf8
+          } else {
+              Add-Content -Path $summaryFile -Value ("- **Peer ID:** ``" + $env:AWL_PEER_ID + "``") -Encoding utf8
+          }
+          
+          Add-Content -Path $summaryFile -Value ("- **IP để kết nối RDP:** ``" + $env:AWL_IP + ":3389" + "``") -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **Username:** ``" + $env:RDP_USER + "``") -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **Password:** ``" + $env:RDP_PASS + "``") -Encoding utf8
 
