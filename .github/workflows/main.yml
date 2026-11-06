@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (Anywherelan P2P RDP - Full)
+name: ThyoCloud Workspace (Anywherelan P2P RDP - Auto Accept)
 
 on:
   workflow_dispatch:
@@ -19,8 +19,6 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Setting up RDP account with fixed password..."
-          
-          # Mật khẩu cố định theo yêu cầu
           $RPASS = "P@ssw0rd!"
           
           $userExists = Get-LocalUser -Name "Admin" -ErrorAction SilentlyContinue
@@ -99,66 +97,69 @@ jobs:
           Start-Sleep -Seconds 20
 
       # ============================================================
-      # STEP 4: GET ANYWARELAN PEER ID AND VPN IP (FIXED JSON KEY)
+      # STEP 4: GET PEER ID, IP AND AUTO-ACCEPT PEERS
       # ============================================================
-      - name: Get Anywherelan Peer ID and IP
+      - name: Get Peer Info & Start Auto-Accept Job
         shell: powershell
         run: |
           $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
           
-          Write-Host "=== EXTRACTING PEER ID (Correct JSON Key) ==="
+          # 1. Lấy Peer ID
+          Write-Host "=== EXTRACTING PEER ID ==="
           $peerId = $null
-          $vpnIp = "10.66.0.1" # IP mặc định của Anywherelan
-          
-          # Thử tối đa 15 lần, mỗi lần cách nhau 2 giây
           $attempts = 0
           while ((-not $peerId) -and ($attempts -lt 15)) {
-              Write-Host "Attempt $($attempts+1): Trying CLI command 'awl cli me id'..."
               $cliOutput = (& $awlExe cli me id 2>&1) | Out-String
-              
-              # Tìm chuỗi ID (thường dài từ 40 ký tự trở lên, bắt đầu bằng 12D3KooW...)
               if ($cliOutput -match '(12D3KooW[a-zA-Z0-9]+)') {
                   $peerId = $matches[1].Trim()
-                  Write-Host "SUCCESS: Found Peer ID via CLI."
                   break
               }
-              
-              Write-Host "CLI command did not return a valid ID. Trying config file..."
-              $configPaths = @(
-                  "$env:APPDATA\anywherelan\config_awl.json",
-                  "$env:LOCALAPPDATA\anywherelan\config_awl.json",
-                  "C:\Users\runneradmin\AppData\Roaming\anywherelan\config_awl.json"
-              )
-              
+              $configPaths = @("$env:APPDATA\anywherelan\config_awl.json", "$env:LOCALAPPDATA\anywherelan\config_awl.json")
               foreach ($cfg in $configPaths) {
                   if (Test-Path $cfg) {
-                      Write-Host "Found config at: $cfg"
                       try {
                           $json = Get-Content $cfg -Raw | ConvertFrom-Json
-                          # TÌM ĐÚNG KHÓA: p2pNode.peerId
                           if ($json.p2pNode -and $json.p2pNode.peerId) {
-                              $peerId = $json.p2pNode.peerId
-                              Write-Host "SUCCESS: Found Peer ID in config file (p2pNode.peerId)."
-                              break
+                              $peerId = $json.p2pNode.peerId; break
                           }
-                      } catch {
-                          Write-Host "Could not parse JSON from $cfg"
-                      }
+                      } catch {}
                   }
               }
-              
-              if (-not $peerId) {
-                  Start-Sleep -Seconds 2
-                  $attempts++
-              }
+              if (-not $peerId) { Start-Sleep -Seconds 2; $attempts++ }
           }
-
-          Write-Host "======================================================="
-          Write-Host "FINAL PEER ID: $peerId"
-          Write-Host "======================================================="
-
+          Write-Host "PEER ID: $peerId"
           "AWL_PEER_ID=$peerId" >> $env:GITHUB_ENV
+
+          # 2. Lấy IP VPN thực tế được cấp
+          Write-Host "=== EXTRACTING VPN IP ==="
+          $vpnIp = "10.66.0.1" # Mặc định
+          $meOutput = (& $awlExe cli me 2>&1) | Out-String
+          if ($meOutput -match 'IP:\s*([0-9\.]+)') {
+              $vpnIp = $matches[1]
+          }
+          Write-Host "VPN IP: $vpnIp"
           "AWL_IP=$vpnIp" >> $env:GITHUB_ENV
+
+          # 3. TẠO BACKGROUND JOB TỰ ĐỘNG CHẤP NHẬN PEER
+          Write-Host "=== STARTING AUTO-ACCEPT BACKGROUND JOB ==="
+          Start-Job -ScriptBlock {
+              param($exe)
+              while ($true) {
+                  try {
+                      # Lấy danh sách peer hiện tại
+                      $peersOutput = & $exe cli peers 2>&1 | Out-String
+                      # Tìm tất cả các chuỗi ID hợp lệ trong output
+                      $matches = [regex]::Matches($peersOutput, '(12D3KooW[a-zA-Z0-9]+)')
+                      foreach ($match in $matches) {
+                          $id = $match.Groups[1].Value
+                          # Thử chấp nhận (nếu đã chấp nhận rồi, lệnh sẽ lặng lẽ bỏ qua)
+                          & $exe cli peers accept $id 2>&1 | Out-Null
+                      }
+                  } catch {}
+                  Start-Sleep -Seconds 5
+              }
+          } -ArgumentList $awlExe
+          Write-Host "Auto-accept job started successfully!"
 
       # ============================================================
       # STEP 5: PUBLISH CONNECTION DETAILS
@@ -173,7 +174,7 @@ jobs:
           Add-Content -Path $summaryFile -Value "### 1. Mã Peer ID (Nhập vào App Anywherelan trên Điện thoại):" -Encoding utf8
           
           if ([string]::IsNullOrEmpty($env:AWL_PEER_ID)) {
-              Add-Content -Path $summaryFile -Value "- **CẢNH BÁO:** Không lấy được Peer ID tự động. Hãy mở log của bước 'Get Anywherelan Peer ID and IP' để tìm chuỗi ID dài và tự copy." -Encoding utf8
+              Add-Content -Path $summaryFile -Value "- **CẢNH BÁO:** Không lấy được Peer ID. Hãy thử chạy lại workflow." -Encoding utf8
           } else {
               Add-Content -Path $summaryFile -Value ("- **Peer ID:** ``" + $env:AWL_PEER_ID + "``") -Encoding utf8
           }
@@ -183,6 +184,8 @@ jobs:
           Add-Content -Path $summaryFile -Value ("- **IP:** ``" + $env:AWL_IP + "``") -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **Username:** ``" + $env:RDP_USER + "``") -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **Password:** ``" + $env:RDP_PASS + "``") -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "> **LƯU Ý:** Máy ảo đã được cấu hình để **TỰ ĐỘNG CHẤP NHẬN** mọi kết nối từ điện thoại của bạn." -Encoding utf8
 
       # ============================================================
       # STEP 6: KEEP SESSION ALIVE
