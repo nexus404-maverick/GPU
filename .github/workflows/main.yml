@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (Anywherelan P2P RDP)
+name: ThyoCloud Workspace (Anywherelan P2P RDP - Debug)
 
 on:
   workflow_dispatch:
@@ -91,55 +91,57 @@ jobs:
           Start-Sleep -Seconds 20
 
       # ============================================================
-      # STEP 4: GET ANYWARELAN PEER ID AND VPN IP (FIXED)
+      # STEP 4: GET ANYWARELAN PEER ID AND VPN IP (DEEP DEBUG)
       # ============================================================
       - name: Get Anywherelan Peer ID and IP
         shell: powershell
         run: |
           $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
           
-          Write-Host "Getting Peer Info from Anywherelan..."
-          $peerId = $null
-          $vpnIp = $null
-          $attempts = 0
+          Write-Host "=== DEBUGGING ANYWARELAN CLI ==="
+          Write-Host "Running 'awl status'..."
+          & $awlExe status 2>&1 | Out-String | Write-Host
           
-          # Thử lấy thông tin nhiều lần nếu daemon chưa sẵn sàng
-          while ((-not $peerId -or -not $vpnIp) -and $attempts -lt 10) {
-              Start-Sleep -Seconds 3
-              
-              # Lệnh 'awl status' trả về toàn bộ thông tin máy
-              $statusOutput = (& $awlExe status 2>&1) | Out-String
-              
-              # Tìm Peer ID (thường là chuỗi dài các chữ cái và số)
-              if ($statusOutput -match 'Peer ID:\s*([a-zA-Z0-9]+)') {
-                  $peerId = $matches[1].Trim()
-              } elseif ($statusOutput -match 'ID:\s*([a-zA-Z0-9]+)') {
-                  $peerId = $matches[1].Trim()
-              }
-              
-              # Tìm IP nội bộ
-              if ($statusOutput -match 'IP:\s*(\d+\.\d+\.\d+\.\d+)') {
-                  $vpnIp = $matches[1].Trim()
-              } else {
-                  $vpnIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -like "10.66.*" }).IPAddress
-              }
-              
-              $attempts++
+          Write-Host "Running 'awl cli me'..."
+          & $awlExe cli me 2>&1 | Out-String | Write-Host
+          
+          Write-Host "=== SEARCHING FOR CONFIG FILE ==="
+          $configSearch = Get-ChildItem -Path $env:APPDATA, $env:LOCALAPPDATA, "C:\Users\runneradmin" -Filter "*awl*" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 10
+          if ($configSearch) {
+              Write-Host "Found related files/folders:"
+              $configSearch | ForEach-Object { Write-Host $_.FullName }
+          } else {
+              Write-Host "No files found in AppData."
           }
           
-          # Nếu lệnh status không trả về, thử đọc file config trực tiếp
+          # --- Cố gắng trích xuất tự động ---
+          $peerId = $null
+          $vpnIp = "10.66.0.1" # Fallback IP
+          
+          # 1. Thử tìm trong output của lệnh status
+          $statusOutput = (& $awlExe status 2>&1) | Out-String
+          if ($statusOutput -match '(?m)^ID:\s*([a-zA-Z0-9]+)') { $peerId = $matches[1] }
+          elseif ($statusOutput -match '(?m)^Peer ID:\s*([a-zA-Z0-9]+)') { $peerId = $matches[1] }
+          
+          # 2. Thử tìm trong file config.json (nếu có)
           if (-not $peerId) {
-              Write-Host "Fallback: Reading config file..."
-              $configPath = "$env:APPDATA\awl\config.json"
-              if (Test-Path $configPath) {
-                  $config = Get-Content $configPath | ConvertFrom-Json
-                  $peerId = $config.peer_id
+              $possibleConfigs = @(
+                  "$env:APPDATA\awl\config.json",
+                  "$env:LOCALAPPDATA\awl\config.json",
+                  "C:\Users\runneradmin\.awl\config.json"
+              )
+              foreach ($cfg in $possibleConfigs) {
+                  if (Test-Path $cfg) {
+                      Write-Host "Found config at $cfg. Extracting ID..."
+                      $json = Get-Content $cfg | ConvertFrom-Json
+                      if ($json.peer_id) { $peerId = $json.peer_id; break }
+                      if ($json.ID) { $peerId = $json.ID; break }
+                  }
               }
           }
 
           Write-Host "======================================================="
-          Write-Host "PEER ID: $peerId"
-          Write-Host "VPN IP: $vpnIp"
+          Write-Host "FINAL EXTRACTED PEER ID: $peerId"
           Write-Host "======================================================="
 
           "AWL_PEER_ID=$peerId" >> $env:GITHUB_ENV
@@ -156,7 +158,13 @@ jobs:
           Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Anywherelan P2P)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### 1. Mã Peer ID (Nhập vào App Anywherelan trên Điện thoại):" -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("- **Peer ID:** ``" + $env:AWL_PEER_ID + "``") -Encoding utf8
+          
+          if ([string]::IsNullOrEmpty($env:AWL_PEER_ID)) {
+              Add-Content -Path $summaryFile -Value "- **CẢNH BÁO:** Không lấy được Peer ID tự động. Bạn hãy mở log của bước 'Get Anywherelan Peer ID and IP' để tìm chuỗi ID và tự copy." -Encoding utf8
+          } else {
+              Add-Content -Path $summaryFile -Value ("- **Peer ID:** ``" + $env:AWL_PEER_ID + "``") -Encoding utf8
+          }
+          
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### 2. Thông tin kết nối RDP (Nhập vào App Remote Desktop):" -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **IP:** ``" + $env:AWL_IP + "``") -Encoding utf8
