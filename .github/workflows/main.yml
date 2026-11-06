@@ -99,14 +99,14 @@ jobs:
           Start-Sleep -Seconds 20
 
       # ============================================================
-      # STEP 4: GET ANYWARELAN PEER ID AND VPN IP (ROBUST MODE)
+      # STEP 4: GET ANYWARELAN PEER ID AND VPN IP (FIXED JSON KEY)
       # ============================================================
       - name: Get Anywherelan Peer ID and IP
         shell: powershell
         run: |
           $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
           
-          Write-Host "=== EXTRACTING PEER ID (Robust Mode) ==="
+          Write-Host "=== EXTRACTING PEER ID (Correct JSON Key) ==="
           $peerId = $null
           $vpnIp = "10.66.0.1" # IP mặc định của Anywherelan
           
@@ -116,8 +116,8 @@ jobs:
               Write-Host "Attempt $($attempts+1): Trying CLI command 'awl cli me id'..."
               $cliOutput = (& $awlExe cli me id 2>&1) | Out-String
               
-              # Tìm chuỗi ID (thường dài từ 40 ký tự trở lên)
-              if ($cliOutput -match '([a-zA-Z0-9]{40,})') {
+              # Tìm chuỗi ID (thường dài từ 40 ký tự trở lên, bắt đầu bằng 12D3KooW...)
+              if ($cliOutput -match '(12D3KooW[a-zA-Z0-9]+)') {
                   $peerId = $matches[1].Trim()
                   Write-Host "SUCCESS: Found Peer ID via CLI."
                   break
@@ -135,9 +135,10 @@ jobs:
                       Write-Host "Found config at: $cfg"
                       try {
                           $json = Get-Content $cfg -Raw | ConvertFrom-Json
-                          if ($json.peer_id) {
-                              $peerId = $json.peer_id
-                              Write-Host "SUCCESS: Found Peer ID in config file."
+                          # TÌM ĐÚNG KHÓA: p2pNode.peerId
+                          if ($json.p2pNode -and $json.p2pNode.peerId) {
+                              $peerId = $json.p2pNode.peerId
+                              Write-Host "SUCCESS: Found Peer ID in config file (p2pNode.peerId)."
                               break
                           }
                       } catch {
