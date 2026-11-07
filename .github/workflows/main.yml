@@ -1,164 +1,59 @@
-name: ThyoCloud Workspace (RustDesk + XyDesk)
+name: RDP via Custom FRP Tunnel
 
 on:
   workflow_dispatch:
 
 jobs:
-  deploy-workspace:
+  deploy:
     runs-on: windows-2022
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      # ============================================================
-      # STEP 1: SETUP RDP FALLBACK & XYDESK OPTIMIZATIONS
-      # ============================================================
-      - name: Setup RDP & Optimize System
+      - name: Setup RDP & Firewall
         shell: powershell
         run: |
-          Write-Host "Setting up RDP fallback account..."
           $RPASS = "P@ssw0rd!"
-          
           net user Admin $RPASS /add
           net localgroup "Administrators" Admin /add 2>$null
           net localgroup "Remote Desktop Users" Admin /add 2>$null
-          Set-LocalUser -Name Admin -PasswordNeverExpires $true
-
-          # XyDesk Optimizations
-          Write-Host "Applying XyDesk Optimizations..."
-          $ErrorActionPreference = "SilentlyContinue"
           
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fSingleSessionPerUser" -Value 0
-          
-          $tsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-          if (!(Test-Path $tsPolicy)) { New-Item -Path $tsPolicy -Force | Out-Null }
-          
-          New-ItemProperty -Path $tsPolicy -Name "AVC444ModePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
-          New-ItemProperty -Path $tsPolicy -Name "AVCHardwareEncodePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
-          New-ItemProperty -Path $tsPolicy -Name "DWMFRAMEINTERVAL" -PropertyType DWord -Value 16 -Force | Out-Null
-          
-          # Tắt tường lửa hoàn toàn
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
-          netsh advfirewall firewall add rule name="RDP All Profiles" dir=in action=allow protocol=TCP localport=3389 profile=any | Out-Null
           
-          Start-Service TermService
-          Write-Host "[SUCCESS] System optimized!"
+          "RDP_USER=Admin" >> $env:GITHUB_ENV
+          "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
-      # ============================================================
-      # STEP 2: DOWNLOAD AND INSTALL RUSTDESK
-      # ============================================================
-      - name: Install RustDesk (MSI)
+      - name: Setup FRP Client & Connect
         shell: powershell
         run: |
-          Write-Host "Downloading RustDesk MSI..."
-          $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
-          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
+          $frpUrl = "https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
+          curl.exe -L --fail -o "frp.zip" $frpUrl
+          Expand-Archive -Path "frp.zip" -DestinationPath "C:\frp" -Force
           
-          curl.exe -L --fail --retry 5 -o $msiPath $url
+          # ============================================================
+          # SỬA DÒNG DƯỚI ĐÂY: Điền IP hoặc Domain của máy phụ vào
+          $serverAddress = "TEN_MIEN_HOAC_IP_MAY_PHU" 
+          # ============================================================
           
-          Write-Host "Installing RustDesk silently..."
-          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait
-          
-          Write-Host "Waiting for RustDesk service to start..."
-          Start-Sleep -Seconds 15
+          $config = @"
+serverAddr = "$serverAddress"
+serverPort = 7000
+auth.method = "token"
+auth.token = "HiepDev_Secure_Token_2026"
 
-      # ============================================================
-      # STEP 3: SET PASSWORD AND GET ID (DÙNG LỆNH CỦA BẠN)
-      # ============================================================
-      - name: Configure RustDesk & Get ID
-        shell: powershell
-        run: |
-          # Chuyển vào thư mục cài đặt RustDesk theo đúng yêu cầu
-          cd "C:\Program Files\RustDesk"
-          
-          Write-Host "Applying permanent password..."
-          # Set mật khẩu vĩnh viễn
-          .\rustdesk.exe --password "P@ssw0rd!"
+[[proxies]]
+name = "github-rdp"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 3389
+remotePort = 13389
+"@
+          $config | Out-File -FilePath "C:\frp\frpc.toml" -Encoding utf8
+          Start-Process -FilePath "C:\frp\frpc.exe" -ArgumentList "-c C:\frp\frpc.toml" -WindowStyle Hidden
           Start-Sleep -Seconds 5
-          
-          Write-Host "Retrieving RustDesk ID (waiting for connection)..."
-          $rustdeskId = $null
-          $attempts = 0
-          
-          # Lặp lại việc lấy ID (vì server RustDesk có thể khởi tạo chậm)
-          while (-not $rustdeskId -and $attempts -lt 15) {
-              # Sử dụng chính xác lệnh bạn đã đưa
-              $idOutput = (.\rustdesk.exe --get-id 2>&1) | Out-String
-              
-              if ($idOutput -match '(\d{9,10})') {
-                  $rustdeskId = $matches[1]
-                  break
-              }
-              
-              Write-Host "Attempt $($attempts+1): ID not found yet. Retrying in 5s..."
-              Start-Sleep -Seconds 5
-              $attempts++
-          }
-          
-          if (-not $rustdeskId) { 
-              throw "Could not retrieve RustDesk ID. The GitHub runner IP might be blocked by RustDesk public servers." 
-          }
-          
-          Write-Host "======================================================="
-          Write-Host "RUSTDESK ID: $rustdeskId"
-          Write-Host "======================================================="
-          
-          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
 
-      # ============================================================
-      # STEP 4: SET WALLPAPER (Tùy chọn)
-      # ============================================================
-      - name: Set Wallpaper
+      - name: Keep Session Alive
         shell: powershell
         run: |
-          $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
-          if (Test-Path $LocalWallpaper) {
-              $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
-              Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
-              
-              $tsPolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-              New-Item -Path $tsPolicyPath -Force | Out-Null
-              Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
-              
-              $RegPath = "HKCU:\Control Panel\Desktop"
-              Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
-              Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
-              Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
-              
-              $csharpCode = 'using System; using System.Runtime.InteropServices; public class Wallpaper { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
-              Add-Type -TypeDefinition $csharpCode
-              [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
-          }
-
-      # ============================================================
-      # STEP 5: PUBLISH CONNECTION DETAILS
-      # ============================================================
-      - name: Publish Connection Details
-        shell: powershell
-        run: |
-          $summaryFile = $env:GITHUB_STEP_SUMMARY
-          
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (RustDesk)" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### Thông tin kết nối (Dành cho Điện thoại / Máy tính):" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **RustDesk ID:** ``$env:RUSTDESK_ID``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Mật khẩu:** ``P@ssw0rd!``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### Hướng dẫn:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "1. Tải app **RustDesk** trên điện thoại (Android/iOS) hoặc máy tính." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. Nhập **RustDesk ID** ở trên vào ô 'Remote ID'." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "3. Bấm **Connect** và nhập mật khẩu ``P@ssw0rd!``." -Encoding utf8
-
-      # ============================================================
-      # STEP 6: KEEP SESSION ALIVE
-      # ============================================================
-      - name: Keep session alive
-        shell: powershell
-        run: |
-          while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - RustDesk is running..."
-              Start-Sleep -Seconds 300
-          }
+          while ($true) { Start-Sleep -Seconds 300 }
