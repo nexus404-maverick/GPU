@@ -25,7 +25,7 @@ jobs:
           "RDP_USER=Admin" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
-      - name: Setup FRP Client & Connect
+      - name: Setup FRP Client & Connect (Debug Mode)
         shell: powershell
         env:
           FRP_SERVER_IP: ${{ secrets.FRP_SERVER_IP }}
@@ -33,11 +33,6 @@ jobs:
         run: |
           $serverAddress = $env:FRP_SERVER_IP
           $authToken = $env:FRP_AUTH_TOKEN
-          
-          if ([string]::IsNullOrEmpty($serverAddress)) {
-              Write-Host "ERROR: FRP_SERVER_IP Secret is empty. Please check your GitHub Secrets."
-              exit 1
-          }
           
           Write-Host "Downloading FRP Client..."
           $frpUrl = "https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
@@ -48,14 +43,8 @@ jobs:
           $extractPath = "$env:RUNNER_TEMP\frp_extract"
           Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
           
-          # Tìm file frpc.exe thực tế (nó nằm trong thư mục con)
           $frpcExe = (Get-ChildItem -Path $extractPath -Filter "frpc.exe" -Recurse | Select-Object -First 1).FullName
           
-          if (-not $frpcExe) {
-              Write-Host "ERROR: Cannot find frpc.exe after extraction."
-              exit 1
-          }
-
           Write-Host "Creating config file..."
           $configPath = "$env:RUNNER_TEMP\frpc.toml"
           
@@ -76,10 +65,30 @@ jobs:
           $configLines | Out-File -FilePath $configPath -Encoding utf8
           
           Write-Host "Connecting to $serverAddress..."
-          Start-Process -FilePath $frpcExe -ArgumentList "-c `"$configPath`"" -WindowStyle Hidden
           
-          Start-Sleep -Seconds 5
-          Write-Host "[SUCCESS] Connected to your server!"
+          # CHẠY FRPC VÀ IN LOG RA MÀN HÌNH (Bỏ WindowStyle Hidden)
+          # Lệnh này sẽ chạy trong 15 giây, in ra log thực tế của frpc
+          $process = Start-Process -FilePath $frpcExe -ArgumentList "-c `"$configPath`"" -NoNewWindow -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\frpc.log" -RedirectStandardError "$env:RUNNER_TEMP\frpc.err"
+          
+          Start-Sleep -Seconds 10
+          
+          Write-Host "=== FRPC LOG OUTPUT ==="
+          if (Test-Path "$env:RUNNER_TEMP\frpc.log") {
+              Get-Content "$env:RUNNER_TEMP\frpc.log"
+          }
+          Write-Host "=== FRPC ERROR OUTPUT ==="
+          if (Test-Path "$env:RUNNER_TEMP\frpc.err") {
+              Get-Content "$env:RUNNER_TEMP\frpc.err"
+          }
+          Write-Host "======================="
+          
+          # Nếu process vẫn đang chạy ngầm sau khi in log, cứ để nó chạy tiếp
+          if ($process.HasExited) {
+              Write-Host "ERROR: FRPC process has exited! Check the logs above."
+              exit 1
+          } else {
+              Write-Host "FRPC is running in background."
+          }
 
       - name: Publish Connection Details
         shell: powershell
