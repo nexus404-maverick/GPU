@@ -27,6 +27,7 @@ jobs:
       - name: Setup FRP Client & Connect
         shell: powershell
         run: |
+          Write-Host "Downloading FRP Client..."
           $frpUrl = "https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
           curl.exe -L --fail -o "frp.zip" $frpUrl
           Expand-Archive -Path "frp.zip" -DestinationPath "C:\frp" -Force
@@ -36,22 +37,37 @@ jobs:
           $serverAddress = "TEN_MIEN_HOAC_IP_MAY_PHU" 
           # ============================================================
           
-          $config = @"
-serverAddr = "$serverAddress"
-serverPort = 7000
-auth.method = "token"
-auth.token = "HiepDev_Secure_Token_2026"
-
-[[proxies]]
-name = "github-rdp"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 3389
-remotePort = 13389
-"@
-          $config | Out-File -FilePath "C:\frp\frpc.toml" -Encoding utf8
+          # Tạo file cấu hình bằng mảng (Tránh lỗi cú pháp YAML)
+          $configLines = @(
+              "serverAddr = `"$serverAddress`"",
+              "serverPort = 7000",
+              "auth.method = `"token`"",
+              "auth.token = `"HiepDev_Secure_Token_2026`"",
+              "",
+              "[[proxies]]",
+              "name = `"github-rdp`"",
+              "type = `"tcp`"",
+              "localIP = `"127.0.0.1`"",
+              "localPort = 3389",
+              "remotePort = 13389"
+          )
+          
+          $configLines | Out-File -FilePath "C:\frp\frpc.toml" -Encoding utf8
+          
+          Write-Host "Starting FRP Client..."
           Start-Process -FilePath "C:\frp\frpc.exe" -ArgumentList "-c C:\frp\frpc.toml" -WindowStyle Hidden
+          
           Start-Sleep -Seconds 5
+          Write-Host "[SUCCESS] Connected to your server!"
+
+      - name: Publish Connection Details
+        shell: powershell
+        run: |
+          $summaryFile = $env:GITHUB_STEP_SUMMARY
+          Add-Content -Path $summaryFile -Value "## Kết nối RDP" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Địa chỉ:** ``${{ env.SERVER_IP }}:13389`` (Thay bằng IP máy phụ của bạn)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **User:** ``Admin``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Pass:** ``P@ssw0rd!``" -Encoding utf8
 
       - name: Keep Session Alive
         shell: powershell
