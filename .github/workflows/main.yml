@@ -1,4 +1,4 @@
-name: ThyoCloud Workspace (Anywherelan P2P RDP - Debug)
+name: ThyoCloud Workspace (RustDesk + XyDesk)
 
 on:
   workflow_dispatch:
@@ -13,95 +13,125 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # STEP 1: SETUP RDP ACCOUNT
+      # STEP 1: SETUP RDP FALLBACK & XYDESK OPTIMIZATIONS
       # ============================================================
-      - name: Setup RDP Account
+      - name: Setup RDP & Optimize System
         shell: powershell
         run: |
+          Write-Host "Setting up RDP fallback account..."
           $RPASS = "P@ssw0rd!"
+          
           net user Admin $RPASS /add
           net localgroup "Administrators" Admin /add 2>$null
           net localgroup "Remote Desktop Users" Admin /add 2>$null
           Set-LocalUser -Name Admin -PasswordNeverExpires $true
-          "RDP_USER=Admin" >> $env:GITHUB_ENV
-          "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
-      # ============================================================
-      # STEP 2: APPLY XYDESK OPTIMIZATIONS & DISABLE FIREWALL
-      # ============================================================
-      - name: Apply XyDesk Optimizations & Disable Firewall
-        shell: powershell
-        run: |
+          # XyDesk Optimizations
+          Write-Host "Applying XyDesk Optimizations..."
+          $ErrorActionPreference = "SilentlyContinue"
+          
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fSingleSessionPerUser" -Value 0
+          
+          $tsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (!(Test-Path $tsPolicy)) { New-Item -Path $tsPolicy -Force | Out-Null }
+          
+          New-ItemProperty -Path $tsPolicy -Name "AVC444ModePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "AVCHardwareEncodePreferred" -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty -Path $tsPolicy -Name "DWMFRAMEINTERVAL" -PropertyType DWord -Value 16 -Force | Out-Null
+          
+          # Tắt tường lửa hoàn toàn
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
           netsh advfirewall firewall add rule name="RDP All Profiles" dir=in action=allow protocol=TCP localport=3389 profile=any | Out-Null
+          
           Start-Service TermService
+          Write-Host "[SUCCESS] System optimized!"
 
       # ============================================================
-      # STEP 3: DOWNLOAD AND RUN ANYWARELAN
+      # STEP 2: DOWNLOAD AND INSTALL RUSTDESK
       # ============================================================
-      - name: Download and Start Anywherelan (awl)
+      - name: Install RustDesk (MSI)
         shell: powershell
         run: |
-          $awlUrl = "https://github.com/anywherelan/awl/releases/download/v0.20.0/awl-windows-amd64-v0.20.0.zip"
-          $awlZip = "$env:RUNNER_TEMP\awl.zip"
-          curl.exe -L --fail -o $awlZip $awlUrl
-          Expand-Archive -Path $awlZip -DestinationPath "$env:RUNNER_TEMP\awl" -Force
-          $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
-          Start-Process -FilePath $awlExe -WindowStyle Hidden
-          Write-Host "Waiting for Anywherelan to initialize (30s)..."
-          Start-Sleep -Seconds 30
+          Write-Host "Downloading RustDesk MSI..."
+          $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
+          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
+          
+          curl.exe -L --fail --retry 5 -o $msiPath $url
+          
+          Write-Host "Installing RustDesk silently..."
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait
+          
+          Write-Host "Waiting for RustDesk service to start..."
+          Start-Sleep -Seconds 15
 
       # ============================================================
-      # STEP 4: GET PEER ID (DEBUG MODE)
+      # STEP 3: SET PASSWORD AND GET ID (DÙNG LỆNH CỦA BẠN)
       # ============================================================
-      - name: Get Peer Info & Start Auto-Accept Job
+      - name: Configure RustDesk & Get ID
         shell: powershell
         run: |
-          $awlExe = "$env:RUNNER_TEMP\awl\awl.exe"
+          # Chuyển vào thư mục cài đặt RustDesk theo đúng yêu cầu
+          cd "C:\Program Files\RustDesk"
           
-          Write-Host "=== IN TOÀN BỘ OUTPUT CỦA 'awl status' ĐỂ TÌM ID ==="
-          $statusOutput = (& $awlExe status 2>&1) | Out-String
-          Write-Host $statusOutput
+          Write-Host "Applying permanent password..."
+          # Set mật khẩu vĩnh viễn
+          .\rustdesk.exe --password "P@ssw0rd!"
+          Start-Sleep -Seconds 5
           
-          Write-Host "=== IN TOÀN BỘ OUTPUT CỦA 'awl cli me' ==="
-          $cliOutput = (& $awlExe cli me 2>&1) | Out-String
-          Write-Host $cliOutput
-
-          # Cố gắng tự động trích xuất ID bằng Regex mạnh hơn
-          $peerId = $null
-          if ($statusOutput -match '(12D3KooW[a-zA-Z0-9]+)') {
-              $peerId = $matches[1]
-          } elseif ($cliOutput -match '(12D3KooW[a-zA-Z0-9]+)') {
-              $peerId = $matches[1]
-          }
-
-          Write-Host "======================================================="
-          Write-Host "TỰ ĐỘNG TRÍCH XUẤT ĐƯỢC PEER ID: $peerId"
-          Write-Host "======================================================="
-
-          "AWL_PEER_ID=$peerId" >> $env:GITHUB_ENV
-
-          # Lấy IP VPN
-          $vpnIp = "10.66.0.2"
-          if ($statusOutput -match 'IP:\s*([0-9\.]+)') { $vpnIp = $matches[1] }
-          "AWL_IP=$vpnIp" >> $env:GITHUB_ENV
-
-          # Chạy Auto-Accept Job
-          Start-Job -ScriptBlock {
-              param($exe)
-              while ($true) {
-                  try {
-                      $peersOutput = & $exe cli peers 2>&1 | Out-String
-                      $matches = [regex]::Matches($peersOutput, '(12D3KooW[a-zA-Z0-9]+)')
-                      foreach ($match in $matches) {
-                          & $exe cli peers accept $match.Groups[1].Value 2>&1 | Out-Null
-                      }
-                  } catch {}
-                  Start-Sleep -Seconds 5
+          Write-Host "Retrieving RustDesk ID (waiting for connection)..."
+          $rustdeskId = $null
+          $attempts = 0
+          
+          # Lặp lại việc lấy ID (vì server RustDesk có thể khởi tạo chậm)
+          while (-not $rustdeskId -and $attempts -lt 15) {
+              # Sử dụng chính xác lệnh bạn đã đưa
+              $idOutput = (.\rustdesk.exe --get-id 2>&1) | Out-String
+              
+              if ($idOutput -match '(\d{9,10})') {
+                  $rustdeskId = $matches[1]
+                  break
               }
-          } -ArgumentList $awlExe
+              
+              Write-Host "Attempt $($attempts+1): ID not found yet. Retrying in 5s..."
+              Start-Sleep -Seconds 5
+              $attempts++
+          }
+          
+          if (-not $rustdeskId) { 
+              throw "Could not retrieve RustDesk ID. The GitHub runner IP might be blocked by RustDesk public servers." 
+          }
+          
+          Write-Host "======================================================="
+          Write-Host "RUSTDESK ID: $rustdeskId"
+          Write-Host "======================================================="
+          
+          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
+
+      # ============================================================
+      # STEP 4: SET WALLPAPER (Tùy chọn)
+      # ============================================================
+      - name: Set Wallpaper
+        shell: powershell
+        run: |
+          $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
+          if (Test-Path $LocalWallpaper) {
+              $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
+              Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
+              
+              $tsPolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+              New-Item -Path $tsPolicyPath -Force | Out-Null
+              Set-ItemProperty -Path $tsPolicyPath -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
+              
+              $RegPath = "HKCU:\Control Panel\Desktop"
+              Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
+              Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
+              Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
+              
+              $csharpCode = 'using System; using System.Runtime.InteropServices; public class Wallpaper { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
+              Add-Type -TypeDefinition $csharpCode
+              [Wallpaper]::SystemParametersInfo(20, 0, $DestWallpaper, 0x01 -bor 0x02)
+          }
 
       # ============================================================
       # STEP 5: PUBLISH CONNECTION DETAILS
@@ -110,17 +140,17 @@ jobs:
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
-          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (Anywherelan)" -Encoding utf8
           
-          if ([string]::IsNullOrEmpty($env:AWL_PEER_ID)) {
-              Add-Content -Path $summaryFile -Value "**CẢNH BÁO:** Không tự động lấy được Peer ID. Bạn phải mở log của bước 'Get Peer Info & Start Auto-Accept Job', tìm chuỗi bắt đầu bằng ``12D3KooW...`` và copy thủ công." -Encoding utf8
-          } else {
-              Add-Content -Path $summaryFile -Value ("- **Peer ID:** ``" + $env:AWL_PEER_ID + "``") -Encoding utf8
-          }
-          
-          Add-Content -Path $summaryFile -Value ("- **IP để kết nối RDP:** ``" + $env:AWL_IP + ":3389" + "``") -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("- **Username:** ``" + $env:RDP_USER + "``") -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("- **Password:** ``" + $env:RDP_PASS + "``") -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## ThyoCloud Workspace (RustDesk)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Thông tin kết nối (Dành cho Điện thoại / Máy tính):" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **RustDesk ID:** ``$env:RUSTDESK_ID``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Mật khẩu:** ``P@ssw0rd!``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Hướng dẫn:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Tải app **RustDesk** trên điện thoại (Android/iOS) hoặc máy tính." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Nhập **RustDesk ID** ở trên vào ô 'Remote ID'." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "3. Bấm **Connect** và nhập mật khẩu ``P@ssw0rd!``." -Encoding utf8
 
       # ============================================================
       # STEP 6: KEEP SESSION ALIVE
@@ -129,6 +159,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for connection..."
+              Write-Host "[$(Get-Date)] Session Active - RustDesk is running..."
               Start-Sleep -Seconds 300
           }
