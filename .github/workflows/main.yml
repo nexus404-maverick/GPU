@@ -26,23 +26,28 @@ jobs:
 
       - name: Setup FRP Client & Connect
         shell: powershell
+        # KHAI BÁO BIẾN MÔI TRƯỜNG TỪ GITHUB SECRETS
+        env:
+          FRP_SERVER_IP: ${{ secrets.FRP_SERVER_IP }}
+          FRP_AUTH_TOKEN: ${{ secrets.FRP_AUTH_TOKEN }}
         run: |
           Write-Host "Downloading FRP Client..."
           $frpUrl = "https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
           curl.exe -L --fail -o "frp.zip" $frpUrl
           Expand-Archive -Path "frp.zip" -DestinationPath "C:\frp" -Force
           
-          # ============================================================
-          # SỬA DÒNG DƯỚI ĐÂY: Điền IP hoặc Domain của máy phụ vào
-          $serverAddress = "TEN_MIEN_HOAC_IP_MAY_PHU" 
-          # ============================================================
+          # Lấy dữ liệu từ Secrets (thông qua $env)
+          $serverAddress = $env:FRP_SERVER_IP
+          $authToken = $env:FRP_AUTH_TOKEN
           
-          # Tạo file cấu hình bằng mảng (Tránh lỗi cú pháp YAML)
+          Write-Host "Connecting to $serverAddress..."
+          
+          # Tạo file cấu hình bằng mảng
           $configLines = @(
               "serverAddr = `"$serverAddress`"",
               "serverPort = 7000",
               "auth.method = `"token`"",
-              "auth.token = `"HiepDev_Secure_Token_2026`"",
+              "auth.token = `"$authToken`"",
               "",
               "[[proxies]]",
               "name = `"github-rdp`"",
@@ -62,10 +67,12 @@ jobs:
 
       - name: Publish Connection Details
         shell: powershell
+        env:
+          FRP_SERVER_IP: ${{ secrets.FRP_SERVER_IP }}
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           Add-Content -Path $summaryFile -Value "## Kết nối RDP" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Địa chỉ:** ``${{ env.SERVER_IP }}:13389`` (Thay bằng IP máy phụ của bạn)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Địa chỉ:** ``$env:FRP_SERVER_IP:13389``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **User:** ``Admin``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Pass:** ``P@ssw0rd!``" -Encoding utf8
 
