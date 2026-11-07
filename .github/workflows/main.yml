@@ -12,6 +12,7 @@ jobs:
       - name: Setup RDP & Firewall
         shell: powershell
         run: |
+          Write-Host "Setting up RDP..."
           $RPASS = "P@ssw0rd!"
           net user Admin $RPASS /add
           net localgroup "Administrators" Admin /add 2>$null
@@ -26,23 +27,38 @@ jobs:
 
       - name: Setup FRP Client & Connect
         shell: powershell
-        # KHAI BÁO BIẾN MÔI TRƯỜNG TỪ GITHUB SECRETS
         env:
           FRP_SERVER_IP: ${{ secrets.FRP_SERVER_IP }}
           FRP_AUTH_TOKEN: ${{ secrets.FRP_AUTH_TOKEN }}
         run: |
-          Write-Host "Downloading FRP Client..."
-          $frpUrl = "https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
-          curl.exe -L --fail -o "frp.zip" $frpUrl
-          Expand-Archive -Path "frp.zip" -DestinationPath "C:\frp" -Force
-          
-          # Lấy dữ liệu từ Secrets (thông qua $env)
           $serverAddress = $env:FRP_SERVER_IP
           $authToken = $env:FRP_AUTH_TOKEN
           
-          Write-Host "Connecting to $serverAddress..."
+          if ([string]::IsNullOrEmpty($serverAddress)) {
+              Write-Host "ERROR: FRP_SERVER_IP Secret is empty. Please check your GitHub Secrets."
+              exit 1
+          }
           
-          # Tạo file cấu hình bằng mảng
+          Write-Host "Downloading FRP Client..."
+          $frpUrl = "https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
+          $zipPath = "$env:RUNNER_TEMP\frp.zip"
+          curl.exe -L --fail -o $zipPath $frpUrl
+          
+          Write-Host "Extracting FRP..."
+          $extractPath = "$env:RUNNER_TEMP\frp_extract"
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+          
+          # Tìm file frpc.exe thực tế (nó nằm trong thư mục con)
+          $frpcExe = (Get-ChildItem -Path $extractPath -Filter "frpc.exe" -Recurse | Select-Object -First 1).FullName
+          
+          if (-not $frpcExe) {
+              Write-Host "ERROR: Cannot find frpc.exe after extraction."
+              exit 1
+          }
+
+          Write-Host "Creating config file..."
+          $configPath = "$env:RUNNER_TEMP\frpc.toml"
+          
           $configLines = @(
               "serverAddr = `"$serverAddress`"",
               "serverPort = 7000",
@@ -57,10 +73,10 @@ jobs:
               "remotePort = 13389"
           )
           
-          $configLines | Out-File -FilePath "C:\frp\frpc.toml" -Encoding utf8
+          $configLines | Out-File -FilePath $configPath -Encoding utf8
           
-          Write-Host "Starting FRP Client..."
-          Start-Process -FilePath "C:\frp\frpc.exe" -ArgumentList "-c C:\frp\frpc.toml" -WindowStyle Hidden
+          Write-Host "Connecting to $serverAddress..."
+          Start-Process -FilePath $frpcExe -ArgumentList "-c `"$configPath`"" -WindowStyle Hidden
           
           Start-Sleep -Seconds 5
           Write-Host "[SUCCESS] Connected to your server!"
@@ -79,4 +95,7 @@ jobs:
       - name: Keep Session Alive
         shell: powershell
         run: |
-          while ($true) { Start-Sleep -Seconds 300 }
+          while ($true) { 
+              Write-Host "[$(Get-Date)] Session Active..."
+              Start-Sleep -Seconds 300 
+          }
