@@ -1,7 +1,12 @@
-name: RDP via Custom FRP Tunnel
+name: Cloud PC via RustDesk
 
 on:
   workflow_dispatch:
+    inputs:
+      customPassword:
+        description: 'RustDesk Password (Leave empty to auto-generate)'
+        required: false
+        default: ''
 
 jobs:
   deploy:
@@ -9,97 +14,133 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Setup RDP & Firewall
-        shell: powershell
-        run: |
-          Write-Host "Setting up RDP..."
-          $RPASS = "P@ssw0rd!"
-          net user Admin $RPASS /add
-          net localgroup "Administrators" Admin /add 2>$null
-          net localgroup "Remote Desktop Users" Admin /add 2>$null
-          
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
-          Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
-          
-          "RDP_USER=Admin" >> $env:GITHUB_ENV
-          "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Setup FRP Client & Connect
+      # ============================================================
+      # BƯỚC 1: TẠO MẬT KHẨU VÀ CÀI ĐẶT HÌNH NỀN
+      # ============================================================
+      - name: Setup Password & Wallpaper
         shell: powershell
         env:
-          FRP_SERVER_IP: ${{ secrets.FRP_SERVER_IP }}
-          FRP_AUTH_TOKEN: ${{ secrets.FRP_AUTH_TOKEN }}
+          RPASS_INPUT: ${{ github.event.inputs.customPassword }}
         run: |
-          $serverAddress = $env:FRP_SERVER_IP
-          $authToken = $env:FRP_AUTH_TOKEN
+          Write-Host "Setting up RustDesk password..."
+          if ([string]::IsNullOrEmpty($env:RPASS_INPUT)) {
+              $upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+              $lower = "abcdefghijkmnopqrstuvwxyz"
+              $digits = "23456789"
+              $special = "!@#$%^&*"
+              $pass = -join (1..4 | ForEach-Object { $special[(Get-Random -Maximum $special.Length)] })
+              $pass += -join (1..4 | ForEach-Object { $upper[(Get-Random -Maximum $upper.Length)] })
+              $pass += -join (1..2 | ForEach-Object { $digits[(Get-Random -Maximum $digits.Length)] })
+              $pass += -join (1..2 | ForEach-Object { $lower[(Get-Random -Maximum $lower.Length)] })
+              $RPASS = -join ($pass.ToCharArray() | Get-Random -Count $pass.Length)
+          } else { $RPASS = $env:RPASS_INPUT }
           
-          if ([string]::IsNullOrEmpty($serverAddress)) {
-              Write-Host "ERROR: FRP_SERVER_IP Secret is empty."
-              exit 1
-          }
+          "RUSTDESK_PASS=$RPASS" >> $env:GITHUB_ENV
           
-          Write-Host "Downloading FRP Client..."
-          $frpUrl = "https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
-          $zipPath = "$env:RUNNER_TEMP\frp.zip"
-          curl.exe -L --fail -o $zipPath $frpUrl
-          
-          Write-Host "Extracting FRP..."
-          $extractPath = "$env:RUNNER_TEMP\frp_extract"
-          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-          
-          $frpcExe = (Get-ChildItem -Path $extractPath -Filter "frpc.exe" -Recurse | Select-Object -First 1).FullName
-          
-          Write-Host "Creating config file..."
-          $configPath = "$env:RUNNER_TEMP\frpc.toml"
-          
-          $configLines = @(
-              "serverAddr = `"$serverAddress`"",
-              "serverPort = 7000",
-              "auth.method = `"token`"",
-              "auth.token = `"$authToken`"",
-              "",
-              "[[proxies]]",
-              "name = `"github-rdp`"",
-              "type = `"tcp`"",
-              "localIP = `"127.0.0.1`"",
-              "localPort = 3389",
-              "remotePort = 13389"
-          )
-          
-          # SỬA LỖI: Ghi file không có BOM (Loại bỏ ký tự ẩn gây lỗi JSON)
-          [System.IO.File]::WriteAllLines($configPath, $configLines, [System.Text.UTF8Encoding]::new($false))
-          
-          Write-Host "Connecting to $serverAddress..."
-          $process = Start-Process -FilePath $frpcExe -ArgumentList "-c `"$configPath`"" -NoNewWindow -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\frpc.log" -RedirectStandardError "$env:RUNNER_TEMP\frpc.err"
-          
-          Start-Sleep -Seconds 5
-          
-          Write-Host "=== FRPC LOG ==="
-          if (Test-Path "$env:RUNNER_TEMP\frpc.log") { Get-Content "$env:RUNNER_TEMP\frpc.log" }
-          if (Test-Path "$env:RUNNER_TEMP\frpc.err") { Get-Content "$env:RUNNER_TEMP\frpc.err" }
-          Write-Host "================="
-          
-          if ($process.HasExited) {
-              Write-Host "ERROR: FRPC process exited! Check logs above."
-              exit 1
+          # Set Wallpaper
+          $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
+          if (Test-Path $LocalWallpaper) {
+              $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
+              Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
+              
+              $RegPath = "HKCU:\Control Panel\Desktop"
+              Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
+              Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
+              Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
           }
 
+      # ============================================================
+      # BƯỚC 2: TẢI VÀ CÀI ĐẶT RUSTDESK
+      # ============================================================
+      - name: Install RustDesk (MSI)
+        shell: powershell
+        run: |
+          Write-Host "Downloading RustDesk MSI..."
+          $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
+          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
+          
+          curl.exe -L --fail --retry 5 -o $msiPath $url
+          
+          Write-Host "Installing RustDesk silently..."
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait
+          
+          Write-Host "Waiting for RustDesk service..."
+          Start-Sleep -Seconds 15
+
+      # ============================================================
+      # BƯỚC 3: ÁP DỤNG MẬT KHẨU VÀ LẤY ID
+      # ============================================================
+      - name: Configure RustDesk & Get ID
+        shell: powershell
+        run: |
+          $rustdeskExe = "C:\Program Files\RustDesk\rustdesk.exe"
+          if (-not (Test-Path $rustdeskExe)) {
+              $rustdeskExe = "C:\Program Files (x86)\RustDesk\rustdesk.exe"
+          }
+          if (-not (Test-Path $rustdeskExe)) { throw "RustDesk executable not found." }
+
+          Write-Host "Applying permanent password..."
+          & $rustdeskExe --password $env:RUSTDESK_PASS
+          
+          Write-Host "Launching RustDesk GUI..."
+          Start-Process -FilePath $rustdeskExe -ArgumentList "--no-autoupdate"
+          Start-Sleep -Seconds 10
+          
+          Write-Host "Retrieving RustDesk ID..."
+          $rustdeskId = $null
+          $attempts = 0
+          
+          # Thử lại nhiều lần nếu server RustDesk chưa phản hồi
+          while (-not $rustdeskId -and $attempts -lt 20) {
+              $idOutput = (& $rustdeskExe --get-id 2>&1) | Out-String
+              if ($idOutput -match '(\d{9,10})') {
+                  $rustdeskId = $matches[1]
+                  break
+              }
+              Write-Host "Attempt $($attempts+1): ID not found yet. Retrying..."
+              Start-Sleep -Seconds 5
+              $attempts++
+          }
+          
+          if (-not $rustdeskId) { 
+              throw "Could not retrieve RustDesk ID. The GitHub runner IP might be blocked by RustDesk public servers." 
+          }
+          
+          Write-Host "======================================================="
+          Write-Host "RUSTDESK ID: $rustdeskId"
+          Write-Host "RUSTDESK PASSWORD: $env:RUSTDESK_PASS"
+          Write-Host "======================================================="
+          
+          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
+
+      # ============================================================
+      # BƯỚC 4: IN THÔNG TIN RA SUMMARY
+      # ============================================================
       - name: Publish Connection Details
         shell: powershell
-        env:
-          FRP_SERVER_IP: ${{ secrets.FRP_SERVER_IP }}
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
-          Add-Content -Path $summaryFile -Value "## Kết nối RDP" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Địa chỉ:** ``$env:FRP_SERVER_IP:13389``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **User:** ``Admin``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Pass:** ``P@ssw0rd!``" -Encoding utf8
+          
+          Add-Content -Path $summaryFile -Value "## Cloud PC (RustDesk)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Thông tin kết nối:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **RustDesk ID:** ``$env:RUSTDESK_ID``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Mật khẩu:** ``$env:RUSTDESK_PASS``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Hướng dẫn:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Tải app **RustDesk** trên điện thoại/máy tính." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Nhập **ID** và **Mật khẩu** ở trên để kết nối." -Encoding utf8
 
-      - name: Keep Session Alive
+      # ============================================================
+      # BƯỚC 5: GIỮ SESSION SỐNG
+      # ============================================================
+      - name: Keep session alive
         shell: powershell
         run: |
-          while ($true) { 
-              Write-Host "[$(Get-Date)] Session Active..."
-              Start-Sleep -Seconds 300 
+          while ($true) {
+              Write-Host "[$(Get-Date)] Session Active - Waiting for connection..."
+              Start-Sleep -Seconds 300
           }
