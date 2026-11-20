@@ -1,12 +1,7 @@
-name: Cloud PC via RustDesk
+name: RustDesk Auto Install & Connect
 
 on:
   workflow_dispatch:
-    inputs:
-      customPassword:
-        description: 'RustDesk Password (Leave empty to auto-generate)'
-        required: false
-        default: ''
 
 jobs:
   deploy:
@@ -18,129 +13,99 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # BƯỚC 1: TẠO MẬT KHẨU VÀ CÀI ĐẶT HÌNH NỀN
+      # BƯỚC 1: CÀI ĐẶT RUSTDESK
       # ============================================================
-      - name: Setup Password & Wallpaper
+      - name: Install RustDesk
         shell: powershell
-        env:
-          RPASS_INPUT: ${{ github.event.inputs.customPassword }}
         run: |
-          Write-Host "Setting up RustDesk password..."
-          if ([string]::IsNullOrEmpty($env:RPASS_INPUT)) {
-              $upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
-              $lower = "abcdefghijkmnopqrstuvwxyz"
-              $digits = "23456789"
-              $special = "!@#$%^&*"
-              $pass = -join (1..4 | ForEach-Object { $special[(Get-Random -Maximum $special.Length)] })
-              $pass += -join (1..4 | ForEach-Object { $upper[(Get-Random -Maximum $upper.Length)] })
-              $pass += -join (1..2 | ForEach-Object { $digits[(Get-Random -Maximum $digits.Length)] })
-              $pass += -join (1..2 | ForEach-Object { $lower[(Get-Random -Maximum $lower.Length)] })
-              $RPASS = -join ($pass.ToCharArray() | Get-Random -Count $pass.Length)
-          } else { $RPASS = $env:RPASS_INPUT }
-          
-          "RUSTDESK_PASS=$RPASS" >> $env:GITHUB_ENV
-          
-          # Set Wallpaper
-          $LocalWallpaper = Join-Path $env:GITHUB_WORKSPACE "Wallpaper\wallpaper.png"
-          if (Test-Path $LocalWallpaper) {
-              $DestWallpaper = "C:\Windows\Web\Wallpaper\thyo_bg.png"
-              Copy-Item -Path $LocalWallpaper -Destination $DestWallpaper -Force
-              
-              $RegPath = "HKCU:\Control Panel\Desktop"
-              Set-ItemProperty -Path $RegPath -Name Wallpaper -Value $DestWallpaper
-              Set-ItemProperty -Path $RegPath -Name WallpaperStyle -Value "10"
-              Set-ItemProperty -Path $RegPath -Name TileWallpaper -Value "0"
+          $VERSION = "1.3.9"
+          $INSTALLER = "rustdesk-$VERSION-x86_64.exe"
+          $URL = "https://github.com/rustdesk/rustdesk/releases/download/$VERSION/$INSTALLER"
+          $INSTALL_DIR = "C:\Program Files\RustDesk"
+          $RUSTDESK_EXE = "$INSTALL_DIR\rustdesk.exe"
+
+          if (-not (Test-Path $RUSTDESK_EXE)) {
+              Write-Host "Downloading RustDesk..."
+              $tempFile = "$env:TEMP\$INSTALLER"
+              Invoke-WebRequest -Uri $URL -OutFile $tempFile -UseBasicParsing
+
+              Write-Host "Installing RustDesk..."
+              Start-Process -FilePath $tempFile -ArgumentList "--silent-install" -Wait
+              Start-Sleep -Seconds 10
+          } else {
+              Write-Host "RustDesk already installed."
           }
 
-      # ============================================================
-      # BƯỚC 2: TẢI VÀ CÀI ĐẶT RUSTDESK
-      # ============================================================
-      - name: Install RustDesk (MSI)
-        shell: powershell
-        run: |
-          Write-Host "Downloading RustDesk MSI..."
-          $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
-          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
+          if (-not (Test-Path $RUSTDESK_EXE)) { throw "Installation failed." }
           
-          curl.exe -L --fail --retry 5 -o $msiPath $url
-          
-          Write-Host "Installing RustDesk silently..."
-          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait
-          
-          Write-Host "Waiting for RustDesk service..."
-          Start-Sleep -Seconds 15
+          Write-Host "Starting RustDesk..."
+          Start-Service -Name "RustDesk" -ErrorAction SilentlyContinue
+          Start-Process -FilePath $RUSTDESK_EXE -WindowStyle Hidden
 
       # ============================================================
-      # BƯỚC 3: ÁP DỤNG MẬT KHẨU VÀ LẤY ID
+      # BƯỚC 2: TẠO MẬT KHẨU VÀ LẤY ID
       # ============================================================
-      - name: Configure RustDesk & Get ID
+      - name: Configure & Get ID
         shell: powershell
         run: |
-          $rustdeskExe = "C:\Program Files\RustDesk\rustdesk.exe"
-          if (-not (Test-Path $rustdeskExe)) {
-              $rustdeskExe = "C:\Program Files (x86)\RustDesk\rustdesk.exe"
-          }
-          if (-not (Test-Path $rustdeskExe)) { throw "RustDesk executable not found." }
+          $RUSTDESK_EXE = "C:\Program Files\RustDesk\rustdesk.exe"
+          
+          # Tạo mật khẩu ngẫu nhiên
+          $chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+          $RDPASS = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
 
-          Write-Host "Applying permanent password..."
-          & $rustdeskExe --password $env:RUSTDESK_PASS
-          
-          Write-Host "Launching RustDesk GUI..."
-          Start-Process -FilePath $rustdeskExe -ArgumentList "--no-autoupdate"
-          Start-Sleep -Seconds 10
-          
-          Write-Host "Retrieving RustDesk ID..."
-          $rustdeskId = $null
+          Write-Host "Applying password..."
+          & $RUSTDESK_EXE --password $RDPASS
+          Start-Sleep -Seconds 3
+
+          # Lấy ID
+          Write-Host "Retrieving ID..."
+          $RDID = $null
           $attempts = 0
-          
-          # Thử lại nhiều lần nếu server RustDesk chưa phản hồi
-          while (-not $rustdeskId -and $attempts -lt 20) {
-              $idOutput = (& $rustdeskExe --get-id 2>&1) | Out-String
+          while (-not $RDID -and $attempts -lt 10) {
+              $idOutput = & $RUSTDESK_EXE --get-id 2>$null
               if ($idOutput -match '(\d{9,10})') {
-                  $rustdeskId = $matches[1]
+                  $RDID = $matches[1]
                   break
               }
-              Write-Host "Attempt $($attempts+1): ID not found yet. Retrying..."
+              Write-Host "Retrying in 5s..."
               Start-Sleep -Seconds 5
               $attempts++
           }
+
+          if (-not $RDID) { throw "Could not get ID." }
+
+          # Lưu vào biến môi trường
+          "RDPASS=$RDPASS" >> $env:GITHUB_ENV
+          "RDID=$RDID" >> $env:GITHUB_ENV
           
-          if (-not $rustdeskId) { 
-              throw "Could not retrieve RustDesk ID. The GitHub runner IP might be blocked by RustDesk public servers." 
-          }
-          
-          Write-Host "======================================================="
-          Write-Host "RUSTDESK ID: $rustdeskId"
-          Write-Host "RUSTDESK PASSWORD: $env:RUSTDESK_PASS"
-          Write-Host "======================================================="
-          
-          "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
+          # Ghi thông tin ra file (Dùng Add-Content thay vì Here-String)
+          $infoFile = "$env:USERPROFILE\Desktop\RustDesk_Info.txt"
+          Add-Content -Path $infoFile -Value "RustDesk - Connection Info" -Encoding utf8
+          Add-Content -Path $infoFile -Value "==========================" -Encoding utf8
+          Add-Content -Path $infoFile -Value ("Time    : " + (Get-Date)) -Encoding utf8
+          Add-Content -Path $infoFile -Value ("ID      : " + $RDID) -Encoding utf8
+          Add-Content -Path $infoFile -Value ("Password: " + $RDPASS) -Encoding utf8
 
       # ============================================================
-      # BƯỚC 4: IN THÔNG TIN RA SUMMARY
+      # BƯỚC 3: IN THÔNG TIN KẾT NỐI
       # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
-          
-          Add-Content -Path $summaryFile -Value "## Cloud PC (RustDesk)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## RustDesk Connection Info" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### Thông tin kết nối:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **RustDesk ID:** ``$env:RUSTDESK_ID``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Mật khẩu:** ``$env:RUSTDESK_PASS``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### Hướng dẫn:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "1. Tải app **RustDesk** trên điện thoại/máy tính." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. Nhập **ID** và **Mật khẩu** ở trên để kết nối." -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **ID:** ``" + $env:RDID + "``") -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **Password:** ``" + $env:RDPASS + "``") -Encoding utf8
 
       # ============================================================
-      # BƯỚC 5: GIỮ SESSION SỐNG
+      # BƯỚC 4: GIỮ SESSION SỐNG
       # ============================================================
-      - name: Keep session alive
+      - name: Keep Session Alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for connection..."
+              Write-Host "[$(Get-Date)] Session Active..."
               Start-Sleep -Seconds 300
           }
