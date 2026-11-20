@@ -1,165 +1,174 @@
-name: RustDesk Auto Install & Connect
-
-run-name: RustDesk on windows-2022 by @${{ github.actor }}
+name: VNC Remote (Windows 2022)
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Phiên bản RustDesk (x86_64)'
+      tunnel:
+        description: 'ngrok = bắt buộc nếu dùng windows-2022 hosted | none = self-hosted/LAN'
+        required: true
+        default: ngrok
+        type: choice
+        options:
+          - ngrok
+          - none
+      allowed_ip:
+        description: 'IP được phép kết nối trực tiếp (chỉ dùng khi tunnel = none). VD: 203.0.113.10/32'
         required: false
-        default: '1.3.9'
-        type: string
-      keep_alive_minutes:
-        description: 'Số phút giữ job sống (<= 360 với GitHub-hosted runner)'
-        required: false
-        default: '350'
-        type: string
-
-permissions:
-  contents: read
+        default: ''
 
 jobs:
-  deploy:
-    runs-on: windows-2022   # nhãn hợp lệ cho runner GitHub-hosted [2]
-    timeout-minutes: 360    # trần tối đa của job trên hosted runner [1]
+  vnc:
+    # Self-hosted: đổi thành -> runs-on: [self-hosted, windows]
+    runs-on: windows-2022
+    timeout-minutes: 360   # giới hạn của job bạn đang dùng
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
       # ============================================================
-      # 1) CÀI ĐẶT + KHỞI ĐỘNG
+      # 1. CÀI TIGHTVNC + ĐẶT MẬT KHẨU
       # ============================================================
-      - name: Install & Start RustDesk
+      - name: Cai TightVNC va tao mat khau
         shell: pwsh
-        env:
-          VERSION: ${{ inputs.version }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $vnc = "$env:ProgramFiles\TightVNC\tightvncserver.exe"
 
-          $version    = $env:VERSION
-          $installer  = "rustdesk-$version-x86_64.exe"
-          $url        = "https://github.com/rustdesk/rustdesk/releases/download/$version/$installer"
-          $installDir = 'C:\Program Files\RustDesk'
-          $exe        = Join-Path $installDir 'rustdesk.exe'
-          $download   = Join-Path $env:RUNNER_TEMP $installer
-
-          Write-Host "→ Tải $url"
-          Invoke-WebRequest -Uri $url -OutFile $download -UseBasicParsing
-
-          if (-not (Test-Path $exe)) {
-            Write-Host '→ Cài đặt im lặng (--silent-install)...'
-            Start-Process -FilePath $download -ArgumentList '--silent-install' -Wait | Out-Null
-
-            # Fallback phòng bản cài không nhận flag ở trên
-            if (-not (Test-Path $exe)) {
-              Write-Host '→ Thử cờ /S ...'
-              Start-Process -FilePath $download -ArgumentList '/S' -Wait | Out-Null
-            }
-            Start-Sleep -Seconds 10
-          } else {
-            Write-Host '→ RustDesk đã có sẵn trên runner.'
+          if (-not (Test-Path $vnc)) {
+            Write-Host "Dang cai TightVNC bang Chocolatey..."
+            choco install tightvnc -y --no-progress
           }
 
-          if (-not (Test-Path $exe)) { throw "Không tìm thấy $exe sau khi cài." }
+          if (-not (Test-Path $vnc)) {
+            $vnc = "${env:ProgramFiles(x86)}\TightVNC\tightvncserver.exe"
+          }
+          if (-not (Test-Path $vnc)) { throw "Khong tim thay tightvncserver.exe" }
 
-          Write-Host '→ Khởi động service/app...'
-          Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-          Start-Process -FilePath $exe -WindowStyle Hidden
-          Start-Sleep -Seconds 8
-
-      # ============================================================
-      # 2) ĐẶT PASS + LẤY ID
-      # ============================================================
-      - name: Configure & Get ID
-        id: rustdesk
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $exe = 'C:\Program Files\RustDesk\rustdesk.exe'
-
+          # RFB/VNC gioi han 8 ky tu -> tao dung 8
           $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-          $pass  = -join (1..12 | ForEach-Object { $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)] })
+          $pass  = -join (1..8 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
 
-          Write-Host '→ Đặt mật khẩu...'
-          & $exe --password $pass | Out-Null
+          # TightVNC -password doc 2 dong tu stdin
+          "$pass`n$pass`n" | & $vnc -password 2>&1 | Out-Null
+          Start-Sleep -Seconds 2
+
+          $key = 'HKLM:\SOFTWARE\TightVNC\Server'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name PortNumber     -Value 5900 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $key -Name AcceptLoopback -Value 1    -PropertyType DWord -Force | Out-Null
+
+          # dung tunnel -> chi nghe loopback; direct -> nghe cac interface
+          $loopback = if ('${{ inputs.tunnel }}' -eq 'ngrok') { 1 } else { 0 }
+          New-ItemProperty -Path $key -Name LoopbackOnly -Value $loopback -PropertyType DWord -Force | Out-Null
+
+          & $vnc -install 2>&1 | Out-Null
+          Get-Service | Where-Object { $_.Name -like '*TightVNC*' } |
+            Start-Service -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 3
 
-          Write-Host '→ Lấy ID...'
-          $id = $null
-          for ($i = 1; $i -le 12 -and -not $id; $i++) {
-            $raw    = (& $exe --get-id 2>$null) -join ''
-            $digits = $raw -replace '\D', ''
-            if ($digits -match '^\d{9,10}$') { $id = $digits; break }
-            Write-Host "   Chưa có ID, thử $i/12 sau 5s..."
-            Start-Sleep -Seconds 5
+          if (-not (Get-Service | Where-Object {
+                $_.Name -like '*TightVNC*' -and $_.Status -eq 'Running'
+              })) {
+            # fallback: chay o che do user session
+            Start-Process -FilePath $vnc -WindowStyle Hidden
           }
-          if (-not $id) { throw 'Không lấy được ID. Hãy mở RustDesk trên runner để kiểm tra.' }
 
-          # Ghi sang các step sau (dùng pwsh nên ghi UTF-8 đúng chuẩn) [6]
-          Add-Content -Path $env:GITHUB_ENV    -Value "RDPASS=$pass"   -Encoding utf8
-          Add-Content -Path $env:GITHUB_ENV    -Value "RDID=$id"       -Encoding utf8
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "id=$id"         -Encoding utf8
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "password=$pass" -Encoding utf8
-
-          $info = @(
-            'RustDesk - Thong tin ket noi tu xa'
-            '=================================='
-            "Thoi gian : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-            "ID        : $id"
-            "Mat khau  : $pass"
-            ''
-            '* Chi dung cho runner cua job nay; mat hieu luc khi job ket thuc.'
-          )
-          $info | Set-Content -Path "$env:USERPROFILE\Desktop\RustDesk_Info.txt" -Encoding utf8
-
-          Write-Host "→ ID=$id | Password=$pass"
+          "VNCPASS=$pass" >> $env:GITHUB_ENV
+          Write-Host "Da dat mat khau VNC."
 
       # ============================================================
-      # 3) HIỂN THỊ TRONG STEP SUMMARY
+      # 2A. TUNNEL NGROK (cho GitHub-hosted runner)
       # ============================================================
-      - name: Publish Connection Details
-        shell: pwsh
-        run: |
-          $bt = [char]96
-          @(
-            '## RustDesk Connection Info'
-            ''
-            "- **ID**      : $bt$env:RDID$bt"
-            "- **Password**: $bt$env:RDPASS$bt"
-            ''
-            'Mo RustDesk, nhap ID + password. Thong tin nay se mat hieu luc khi job ket thuc.'
-          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
-
-      # Tuỳ chọn: tải file info về máy dù runner đã bị dọn
-      - name: Upload info file
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustdesk-info-${{ github.run_number }}
-          path: 'C:\Users\*\Desktop\RustDesk_Info.txt'
-          retention-days: 1
-          if-no-files-found: warn
-
-      # ============================================================
-      # 4) GIỮ SESSION SỐNG
-      # ============================================================
-      - name: Keep Session Alive
+      - name: Mo tunnel ngrok tcp 5900
+        if: ${{ inputs.tunnel == 'ngrok' }}
         shell: pwsh
         env:
-          KEEP_MINUTES: ${{ inputs.keep_alive_minutes }}
+          NGROK_TOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $minutes = [int]$env:KEEP_MINUTES
-          if ($minutes -lt 1)   { $minutes = 1 }
-          if ($minutes -gt 355) { $minutes = 355 }  # chừa 5 phút để job đóng gọn (timeout 360)
-
-          $end = (Get-Date).AddMinutes($minutes)
-          Write-Host "Giữ session đến $($end.ToString('yyyy-MM-dd HH:mm:ss')). ID=$env:RDID"
-
-          while ((Get-Date) -lt $end) {
-            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Session Active..."
-            Start-Sleep -Seconds 300
+          if (-not $env:NGROK_TOKEN) {
+            throw "Them secret NGROK_AUTHTOKEN: Settings > Secrets and variables > Actions"
           }
-          Write-Host 'Xong thời gian giữ session.'
+
+          $zip = "$env:TEMP\ngrok.zip"
+          $dir = "$env:TEMP\ngrok"
+          Invoke-WebRequest `
+            'https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip' `
+            -OutFile $zip -UseBasicParsing
+          Expand-Archive $zip -DestinationPath $dir -Force
+
+          $ngrok = "$dir\ngrok.exe"
+          & $ngrok config add-authtoken $env:NGROK_TOKEN | Out-Null
+
+          Start-Process -FilePath $ngrok `
+            -ArgumentList @('tcp', '5900', '--log=stdout', '--log-format=json') `
+            -RedirectStandardOutput "$env:TEMP\ngrok.log" `
+            -RedirectStandardError  "$env:TEMP\ngrok.err" `
+            -WindowStyle Hidden
+
+          $url = $null
+          for ($i = 0; $i -lt 15 -and -not $url; $i++) {
+            Start-Sleep -Seconds 3
+            if (Test-Path "$env:TEMP\ngrok.log") {
+              $txt = Get-Content "$env:TEMP\ngrok.log" -Raw
+              if ($txt -match 'tcp://[^\s"]+:\d+') { $url = $matches[0] }
+            }
+          }
+
+          if (-not $url) {
+            if (Test-Path "$env:TEMP\ngrok.log") {
+              Get-Content "$env:TEMP\ngrok.log" -Tail 50
+            }
+            throw "Khong lay duoc dia chi ngrok"
+          }
+
+          "VNCURL=$url" >> $env:GITHUB_ENV
+
+      # ============================================================
+      # 2B. KET NOI TRUC TIEP (chi cho self-hosted / LAN)
+      # ============================================================
+      - name: Mo firewall cho IP cu the
+        if: ${{ inputs.tunnel == 'none' }}
+        shell: pwsh
+        run: |
+          $ipAllow = '${{ inputs.allowed_ip }}'
+          if (-not $ipAllow) {
+            throw "Chon tunnel=ngrok, hoac dien allowed_ip (VD: 203.0.113.10/32)"
+          }
+
+          New-NetFirewallRule `
+            -DisplayName 'TightVNC-5900' `
+            -Direction Inbound `
+            -LocalPort 5900 `
+            -Protocol TCP `
+            -Action Allow `
+            -RemoteAddress $ipAllow `
+            -ErrorAction SilentlyContinue | Out-Null
+
+          $localIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+              $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*'
+            } | Select-Object -First 1).IPAddress
+
+          $addr = ("{0}:5900" -f $localIp)
+          "VNCURL=$addr" >> $env:GITHUB_ENV
+
+      # ============================================================
+      # 3. IN THONG TIN KET NOI
+      # ============================================================
+      - name: Hien thi thong tin ket noi
+        shell: pwsh
+        run: |
+          $s = $env:GITHUB_STEP_SUMMARY
+          Add-Content $s "## VNC connection info"
+          Add-Content $s ""
+          Add-Content $s ("- Dia chi : ``" + $env:VNCURL  + "``")
+          Add-Content $s ("- Password: ``" + $env:VNCPASS + "``")
+          Add-Content $s ""
+          Add-Content $s "> VNC khong ma hoa mac dinh [3]; luon di qua tunnel/VPN [4]."
+
+      # ============================================================
+      # 4. GIU JOB SONG
+      # ============================================================
+      - name: Keep session alive
+        shell: pwsh
+        run: |
+          while ($true) {
+            Write-Host "[$(Get-Date -Format o)] VNC dang chay tai $env:VNCURL"
+            Start-Sleep -Seconds 120
+          }
