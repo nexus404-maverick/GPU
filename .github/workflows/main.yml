@@ -1,4 +1,4 @@
-name: RDP via Serveo Tunnel
+name: RDP via Serveo Tunnel (Debug)
 
 on:
   workflow_dispatch:
@@ -28,30 +28,33 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Starting Serveo tunnel for RDP (port 3389)..."
-          # Sử dụng cổng 0 để Serveo tự cấp một cổng ngẫu nhiên
-          # Cờ -T để tránh lỗi pseudo-terminal trên môi trường không có terminal
           $logFile = "$env:RUNNER_TEMP\serveo.log"
           $errFile = "$env:RUNNER_TEMP\serveo.err"
           
-          Start-Process -FilePath "ssh" -ArgumentList "-T -o StrictHostKeyChecking=no -R 0:localhost:3389 serveo.net" -RedirectStandardOutput $logFile -RedirectStandardError $errFile -WindowStyle Hidden
+          # Thêm -p 443 để tránh bị chặn cổng 22, dùng -T để tránh lỗi pseudo-terminal
+          Start-Process -FilePath "ssh" -ArgumentList "-T -p 443 -o StrictHostKeyChecking=no -R 0:localhost:3389 serveo.net" -RedirectStandardOutput $logFile -RedirectStandardError $errFile -WindowStyle Hidden
           
           Write-Host "Waiting for Serveo to assign a public port..."
-          $serveoAddress = $null
-          $attempts = 0
+          Start-Sleep -Seconds 10
           
-          while (-not $serveoAddress -and $attempts -lt 20) {
-              Start-Sleep -Seconds 2
-              if (Test-Path $logFile) {
-                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-                  # Serveo in ra địa chỉ dạng "Forwarding TCP connections from serveo.net:PORT"
-                  if ($content -match 'serveo\.net:(\d+)') {
-                      $serveoAddress = "serveo.net:$($matches[1])"
-                  }
+          # In toàn bộ log ra để xem Serveo báo gì
+          Write-Host "=== SERVEO STDOUT ==="
+          if (Test-Path $logFile) { Get-Content $logFile }
+          Write-Host "=== SERVEO STDERR ==="
+          if (Test-Path $errFile) { Get-Content $errFile }
+          
+          $serveoAddress = $null
+          if (Test-Path $logFile) {
+              $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+              if ($content -match 'serveo\.net:(\d+)') {
+                  $serveoAddress = "serveo.net:$($matches[1])"
               }
-              $attempts++
           }
           
-          if (-not $serveoAddress) { throw "Failed to get Serveo address. Check logs." }
+          if (-not $serveoAddress) { 
+              Write-Host "[ERROR] Could not extract Serveo address from logs above."
+              throw "Serveo tunnel failed. Check the logs above to see why." 
+          }
           
           Write-Host "Serveo Address: $serveoAddress"
           "SERVEO_ADDR=$serveoAddress" >> $env:GITHUB_ENV
@@ -61,13 +64,9 @@ jobs:
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
           Add-Content -Path $summaryFile -Value "## Kết nối RDP qua Serveo" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### Thông tin kết nối:" -Encoding utf8
           Add-Content -Path $summaryFile -Value ("- **Địa chỉ:** ``" + $env:SERVEO_ADDR + "``") -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **User:** ``Admin``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Pass:** ``P@ssw0rd!``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "> **Lưu ý:** Serveo miễn phí có thể ngắt kết nối nếu không có lưu lượng. Nếu bị ngắt, hãy chạy lại workflow." -Encoding utf8
 
       - name: Keep Session Alive
         shell: powershell
