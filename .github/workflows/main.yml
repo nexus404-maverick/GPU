@@ -13,7 +13,7 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Setting up RDP with user Layer7..."
-          $RPASS = "Layer7@2026"
+          $RPASS = "P@ssw0rd!"
           
           # Tạo user Layer7
           $userExists = Get-LocalUser -Name "Layer7" -ErrorAction SilentlyContinue
