@@ -1,4 +1,4 @@
-name: Cloud PC (RustDesk Only - Hidden CMD)
+name: Cloud PC (RustDesk - Lock CMD)
 
 on:
   workflow_dispatch:
@@ -24,19 +24,66 @@ jobs:
           "RDP_USER=Admin" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
-      - name: Hide GitHub Agent Window
+      - name: Block CMD Termination via Group Policy
         shell: powershell
         run: |
-          Write-Host "Hiding the GitHub Agent window..."
-          # Tạo một script VBScript để chuyển cửa sổ cmd sang Desktop ảo khác
-          $vbsCode = @"
-          Set objShell = CreateObject("WScript.Shell")
-          objShell.Run "cmd.exe /c timeout /t 2 && powershell -windowstyle hidden -command ""Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^+#{Right}')"""
+          Write-Host "Applying policies to block CMD termination..."
+          # Chặn Task Manager tắt tiến trình (Cần thiết lập qua GPO)
+          # Đường dẫn Registry cho phép/chặn Task Manager
+          $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\System"
+          if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+          Set-ItemProperty -Path $regPath -Name "DisableTaskMgr" -Value 1 -Type DWord -Force
+          
+          # Chặn các công cụ dòng lệnh như cmd, powershell trong khi phiên chạy
+          $runPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
+          if (-not (Test-Path $runPath)) { New-Item -Path $runPath -Force | Out-Null }
+          Set-ItemProperty -Path $runPath -Name "DisallowRun" -Value 1 -Type DWord -Force
+          
+          # Tạo danh sách các file bị cấm chạy (nhưng trừ cmd của GitHub ra)
+          $disallowPath = "$runPath\DisallowRun"
+          if (-not (Test-Path $disallowPath)) { New-Item -Path $disallowPath -Force | Out-Null }
+          # Chặn người dùng mở cmd mới (nhưng không chặn tiến trình đang chạy)
+          # (Lưu ý: Việc này có thể ảnh hưởng đến các script khác, chỉ nên dùng khi thực sự cần)
+          # Set-ItemProperty -Path $disallowPath -Name "1" -Value "cmd.exe" -Force
+          
+          Write-Host "Policies applied. Task Manager disabled."
+
+      - name: Start Ultra-Fast CMD Hider
+        shell: powershell
+        run: |
+          Write-Host "Starting ultra-fast CMD hider..."
+          # Sử dụng C# để tương tác với Windows API nhanh hơn
+          $hiderScript = @'
+          Add-Type @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Win32 {
+              [DllImport("user32.dll")]
+              public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+              [DllImport("user32.dll")]
+              public static extern bool IsWindowVisible(IntPtr hWnd);
+          }
           "@
-          # Chạy script này ẩn dưới nền để chuyển Desktop
-          $vbsPath = "$env:TEMP\hide_cmd.vbs"
-          $vbsCode | Out-File -FilePath $vbsPath -Encoding ascii
-          Start-Process -FilePath "wscript.exe" -ArgumentList $vbsPath -WindowStyle Hidden
+          
+          # Vòng lặp vô hạn với tốc độ cực cao (không sleep lâu)
+          while ($true) {
+              $procs = Get-Process cmd -ErrorAction SilentlyContinue
+              foreach ($p in $procs) {
+                  # Kiểm tra xem cửa sổ có đang hiện không (để tránh gọi API liên tục)
+                  if ([Win32]::IsWindowVisible($p.MainWindowHandle)) {
+                      # 6 = Minimize, 0 = Hide hoàn toàn (nếu muốn giấu kỹ hơn)
+                      [Win32]::ShowWindow($p.MainWindowHandle, 6) 
+                  }
+              }
+              # Nghỉ cực ngắn (10ms) để giảm tải CPU nhưng vẫn đủ nhanh
+              Start-Sleep -Milliseconds 10
+          }
+          '@
+          $hiderPath = "$env:RUNNER_TEMP\hider.ps1"
+          $hiderScript | Out-File -FilePath $hiderPath -Encoding utf8
+          
+          # Chạy ẩn dưới nền
+          Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$hiderPath`"" -WindowStyle Hidden
 
       - name: Install RustDesk & Get ID
         shell: powershell
