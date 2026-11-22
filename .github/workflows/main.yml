@@ -1,4 +1,4 @@
-name: Cloud PC (RustDesk - Auto Login Layer7)
+name: Cloud PC (RustDesk - Force Layer7 Session)
 
 on:
   workflow_dispatch:
@@ -13,9 +13,9 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Setting up RDP with user Layer7..."
-          $RPASS = "P@ssw0rd!"
+          $RPASS = "Layer7@2026"
           
-          # 1. Tạo user Layer7
+          # Tạo user Layer7
           $userExists = Get-LocalUser -Name "Layer7" -ErrorAction SilentlyContinue
           if (-not $userExists) {
               net user Layer7 $RPASS /add
@@ -26,13 +26,12 @@ jobs:
           net localgroup "Remote Desktop Users" Layer7 /add 2>$null
           Set-LocalUser -Name "Layer7" -PasswordNeverExpires $true
           
-          # 2. Cấu hình RDP
+          # Cấu hình RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
           
-          # 3. Tự động đăng nhập vào Layer7 (Auto Login)
-          # (Điều này giúp khi khởi động lại máy, nó sẽ tự vào Layer7 thay vì runneradmin)
+          # Thiết lập Auto Login cho Layer7
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
           Set-ItemProperty -Path $regPath -Name "AutoAdminLogon" -Value "1" -Type String
           Set-ItemProperty -Path $regPath -Name "DefaultUsername" -Value "Layer7" -Type String
@@ -76,6 +75,31 @@ jobs:
           } else {
               Write-Host "[WARNING] Could not get RustDesk ID. IP may be blocked."
           }
+
+      - name: Force Session to Layer7
+        shell: powershell
+        run: |
+          Write-Host "Attempting to switch active session to Layer7..."
+          
+          # Lấy ID phiên hiện tại của runneradmin
+          $currentSession = (Get-Process -Id $PID).SessionId
+          Write-Host "Current session ID: $currentSession"
+          
+          # Đăng xuất runneradmin bằng cách dùng tscon (chỉ hoạt động nếu có quyền SYSTEM)
+          # Lệnh này sẽ ngắt kết nối phiên hiện tại và đưa về màn hình đăng nhập
+          # Sau đó, AutoAdminLogon sẽ tự động đăng nhập vào Layer7
+          
+          # (Lưu ý: Lệnh này có thể làm rớt kết nối của workflow, nên ta phải chạy nó một cách an toàn)
+          # tscon $currentSession /dest:console
+          
+          Write-Host "Session switch initiated. Please check if RustDesk connects to Layer7."
+          
+          # Tạo một task để chạy tscon sau 10 giây
+          $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c tscon $currentSession /dest:console"
+          $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
+          Register-ScheduledTask -TaskName "SwitchToLayer7" -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest -Force
+          
+          Write-Host "Scheduled session switch in 10 seconds."
 
       - name: Publish Connection Details
         shell: powershell
