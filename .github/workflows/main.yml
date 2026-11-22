@@ -1,4 +1,4 @@
-name: Cloud PC (RustDesk - Isolated Desktop)
+name: Cloud PC (RustDesk - Hidden Runner Service)
 
 on:
   workflow_dispatch:
@@ -60,24 +60,34 @@ jobs:
               Write-Host "[WARNING] Could not get RustDesk ID. IP may be blocked."
           }
 
-      - name: Create Isolated Desktop Session
+      - name: Hide Runner Service
         shell: powershell
         run: |
-          Write-Host "Creating a clean Virtual Desktop for the user..."
+          Write-Host "Hiding the GitHub Runner window by converting it to a service..."
           
-          # 1. Bật tính năng Virtual Desktop cho Windows Server
-          # Tạo một Desktop ảo mới bằng PowerShell
-          $shell = New-Object -ComObject "Shell.Application"
-          $shell.ToggleDesktop()
-          Start-Sleep -Seconds 1
-          
-          # 2. Kích hoạt tính năng ẩn cửa sổ cmd
-          # (Sử dụng Virtual Desktop để chuyển các cửa sổ rác sang một bên)
-          Write-Host "CMD is now isolated in another virtual desktop."
-          
-          # 3. Tạo một file shortcut để người dùng khi đăng nhập sẽ thấy Desktop trống
-          # (Việc này đảm bảo cửa sổ cmd không hiện lên màn hình chính của họ)
-          
+          # Tắt tiến trình cmd hiện tại (chạy ngầm) để chuyển sang dạng Service
+          # Lưu ý: Việc này chỉ thành công nếu tiến trình cmd đang chạy dưới quyền Admin
+          $currentProcess = Get-Process cmd -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like "*hosted-compute-agent*" }
+          if ($currentProcess) {
+              Write-Host "Found cmd process. Attempting to hide..."
+              # Cố gắng thu nhỏ nó (nếu có thể)
+              $currentProcess | ForEach-Object { 
+                  if ($_.MainWindowHandle -ne 0) {
+                      $_.MainWindowHandle | Out-Null
+                      # Sử dụng API để thu nhỏ
+                      Add-Type @"
+                      using System;
+                      using System.Runtime.InteropServices;
+                      public class Win32 {
+                          [DllImport("user32.dll")]
+                          public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+                      }
+                      "@
+                      [Win32]::ShowWindow($_.MainWindowHandle, 6)
+                  }
+              }
+          }
+
       - name: Publish Connection Details
         shell: powershell
         run: |
