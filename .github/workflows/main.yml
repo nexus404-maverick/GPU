@@ -1,4 +1,4 @@
-name: Cloud PC (RustDesk + Bore Fallback)
+name: Cloud PC (RustDesk Only - Hidden CMD)
 
 on:
   workflow_dispatch:
@@ -23,6 +23,20 @@ jobs:
           
           "RDP_USER=Admin" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
+
+      - name: Hide GitHub Agent Window
+        shell: powershell
+        run: |
+          Write-Host "Hiding the GitHub Agent window..."
+          # Tạo một script VBScript để chuyển cửa sổ cmd sang Desktop ảo khác
+          $vbsCode = @"
+          Set objShell = CreateObject("WScript.Shell")
+          objShell.Run "cmd.exe /c timeout /t 2 && powershell -windowstyle hidden -command ""Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^+#{Right}')"""
+          "@
+          # Chạy script này ẩn dưới nền để chuyển Desktop
+          $vbsPath = "$env:TEMP\hide_cmd.vbs"
+          $vbsCode | Out-File -FilePath $vbsPath -Encoding ascii
+          Start-Process -FilePath "wscript.exe" -ArgumentList $vbsPath -WindowStyle Hidden
 
       - name: Install RustDesk & Get ID
         shell: powershell
