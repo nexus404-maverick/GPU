@@ -1,4 +1,4 @@
-name: Cloud PC (RustDesk - Hidden Runner Service)
+name: Cloud PC (RustDesk - Hide CMD)
 
 on:
   workflow_dispatch:
@@ -60,31 +60,21 @@ jobs:
               Write-Host "[WARNING] Could not get RustDesk ID. IP may be blocked."
           }
 
-      - name: Hide Runner Service
+      - name: Hide CMD Window
         shell: powershell
         run: |
-          Write-Host "Hiding the GitHub Runner window by converting it to a service..."
+          Write-Host "Attempting to hide the GitHub Runner CMD window..."
           
-          # Tắt tiến trình cmd hiện tại (chạy ngầm) để chuyển sang dạng Service
-          # Lưu ý: Việc này chỉ thành công nếu tiến trình cmd đang chạy dưới quyền Admin
-          $currentProcess = Get-Process cmd -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like "*hosted-compute-agent*" }
-          if ($currentProcess) {
-              Write-Host "Found cmd process. Attempting to hide..."
-              # Cố gắng thu nhỏ nó (nếu có thể)
-              $currentProcess | ForEach-Object { 
-                  if ($_.MainWindowHandle -ne 0) {
-                      $_.MainWindowHandle | Out-Null
-                      # Sử dụng API để thu nhỏ
-                      Add-Type @"
-                      using System;
-                      using System.Runtime.InteropServices;
-                      public class Win32 {
-                          [DllImport("user32.dll")]
-                          public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-                      }
-                      "@
-                      [Win32]::ShowWindow($_.MainWindowHandle, 6)
-                  }
+          # Sử dụng C# 1 dòng để tránh lỗi Here-String của YAML
+          Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32 { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow); }'
+          
+          # Tìm tiến trình cmd đang chạy
+          $procs = Get-Process cmd -ErrorAction SilentlyContinue
+          foreach ($p in $procs) {
+              if ($p.MainWindowHandle -ne 0) {
+                  # 6 = Minimize
+                  [Win32]::ShowWindow($p.MainWindowHandle, 6)
+                  Write-Host "Minimized CMD window with PID: $($p.Id)"
               }
           }
 
