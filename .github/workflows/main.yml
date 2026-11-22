@@ -28,38 +28,48 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Downloading EasyTier for Windows..."
-          # Tải bản EasyTier mới nhất cho Windows
-          $etUrl = "https://github.com/EasyTier/EasyTier/releases/latest/download/easytier-windows-x86_64.zip"
+          # SỬA LỖI 404: Dùng đúng tên file có kèm version
+          $version = "2.6.4"
+          $etUrl = "https://github.com/EasyTier/EasyTier/releases/download/v$version/easytier-windows-x86_64-v$version.zip"
           $zipPath = "$env:RUNNER_TEMP\easytier.zip"
+          
           curl.exe -L --fail -o $zipPath $etUrl
           
-          Expand-Archive -Path $zipPath -DestinationPath "$env:RUNNER_TEMP\easytier" -Force
-          $etExe = (Get-ChildItem -Path "$env:RUNNER_TEMP\easytier" -Filter "easytier-core.exe" -Recurse | Select-Object -First 1).FullName
+          if (-not (Test-Path $zipPath)) { throw "Failed to download EasyTier." }
           
-          if (-not $etExe) { throw "EasyTier executable not found." }
+          Write-Host "Extracting EasyTier..."
+          $extractPath = "$env:RUNNER_TEMP\easytier_extract"
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+          
+          # Tìm file thực thi (có thể nằm trong thư mục con)
+          $etExe = (Get-ChildItem -Path $extractPath -Filter "easytier-core.exe" -Recurse | Select-Object -First 1).FullName
+          $etCli = (Get-ChildItem -Path $extractPath -Filter "easytier-cli.exe" -Recurse | Select-Object -First 1).FullName
+          
+          if (-not $etExe -or -not $etCli) { throw "EasyTier executables not found." }
           
           Write-Host "Starting EasyTier with shared node..."
           # Sử dụng Shared Node công cộng của EasyTier
-          # Đặt tên mạng và mật khẩu (BẠN NÊN ĐỔI ĐỂ BẢO MẬT)
           $networkName = "hiep-rdp-network"
           $networkSecret = "MatKhauBiMat123"
           $sharedNode = "tcp://public.easytier.top:11010"
           
+          # Chạy core ở chế độ nền
           Start-Process -FilePath $etExe -ArgumentList "-d --network-name $networkName --network-secret $networkSecret -p $sharedNode" -WindowStyle Hidden
           
           Write-Host "Waiting for EasyTier to initialize..."
           Start-Sleep -Seconds 15
           
           # Lấy IP ảo được cấp
-          $etCli = (Get-ChildItem -Path "$env:RUNNER_TEMP\easytier" -Filter "easytier-cli.exe" -Recurse | Select-Object -First 1).FullName
           $status = & $etCli node
           Write-Host $status
           
-          # Trích xuất IP (thường là 10.126.126.x)
           if ($status -match '(\d+\.\d+\.\d+\.\d+)') {
               $vpnIp = $matches[1]
               Write-Host "VPN IP: $vpnIp"
               "VPN_IP=$vpnIp" >> $env:GITHUB_ENV
+          } else {
+              Write-Host "[WARNING] Could not determine VPN IP automatically."
+              "VPN_IP=Check logs" >> $env:GITHUB_ENV
           }
 
       - name: Publish Connection Details
