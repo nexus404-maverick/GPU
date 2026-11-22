@@ -5,7 +5,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: windows-2026
+    runs-on: windows-2025
     timeout-minutes: 360
 
     steps:
