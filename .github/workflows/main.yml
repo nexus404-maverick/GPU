@@ -1,4 +1,4 @@
-name: Cloud PC (RustDesk - Hide CMD)
+name: Cloud PC (RustDesk - Auto Login Layer7)
 
 on:
   workflow_dispatch:
@@ -9,19 +9,36 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Setup RDP & Firewall
+      - name: Setup RDP & Create User Layer7
         shell: powershell
         run: |
+          Write-Host "Setting up RDP with user Layer7..."
           $RPASS = "P@ssw0rd!"
-          net user Admin $RPASS /add
-          net localgroup "Administrators" Admin /add 2>$null
-          net localgroup "Remote Desktop Users" Admin /add 2>$null
           
+          # 1. Tạo user Layer7
+          $userExists = Get-LocalUser -Name "Layer7" -ErrorAction SilentlyContinue
+          if (-not $userExists) {
+              net user Layer7 $RPASS /add
+          } else {
+              Set-LocalUser -Name "Layer7" -Password (ConvertTo-SecureString $RPASS -AsPlainText -Force)
+          }
+          net localgroup "Administrators" Layer7 /add 2>$null
+          net localgroup "Remote Desktop Users" Layer7 /add 2>$null
+          Set-LocalUser -Name "Layer7" -PasswordNeverExpires $true
+          
+          # 2. Cấu hình RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
           
-          "RDP_USER=Admin" >> $env:GITHUB_ENV
+          # 3. Tự động đăng nhập vào Layer7 (Auto Login)
+          # (Điều này giúp khi khởi động lại máy, nó sẽ tự vào Layer7 thay vì runneradmin)
+          $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+          Set-ItemProperty -Path $regPath -Name "AutoAdminLogon" -Value "1" -Type String
+          Set-ItemProperty -Path $regPath -Name "DefaultUsername" -Value "Layer7" -Type String
+          Set-ItemProperty -Path $regPath -Name "DefaultPassword" -Value $RPASS -Type String
+          
+          "RDP_USER=Layer7" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
       - name: Install RustDesk & Get ID
@@ -60,40 +77,19 @@ jobs:
               Write-Host "[WARNING] Could not get RustDesk ID. IP may be blocked."
           }
 
-      - name: Hide CMD Window
-        shell: powershell
-        run: |
-          Write-Host "Attempting to hide the GitHub Runner CMD window..."
-          
-          # Sử dụng C# 1 dòng để tránh lỗi Here-String của YAML
-          Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32 { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow); }'
-          
-          # Tìm tiến trình cmd đang chạy
-          $procs = Get-Process cmd -ErrorAction SilentlyContinue
-          foreach ($p in $procs) {
-              if ($p.MainWindowHandle -ne 0) {
-                  # 6 = Minimize
-                  [Win32]::ShowWindow($p.MainWindowHandle, 6)
-                  Write-Host "Minimized CMD window with PID: $($p.Id)"
-              }
-          }
-
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
-          Add-Content -Path $summaryFile -Value "## Cloud PC Connection Info" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## Cloud PC (Auto Login: Layer7)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Username:** ``Layer7``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
           
           if ($env:RUSTDESK_ID) {
-              Add-Content -Path $summaryFile -Value "### RustDesk (Recommended)" -Encoding utf8
-              Add-Content -Path $summaryFile -Value "- **ID:** ``$env:RUSTDESK_ID``" -Encoding utf8
-              Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
-          } else {
-              Add-Content -Path $summaryFile -Value "### RustDesk" -Encoding utf8
-              Add-Content -Path $summaryFile -Value "- **Failed to get ID (IP blocked)**" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "### RustDesk ID:" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "- ``$env:RUSTDESK_ID``" -Encoding utf8
           }
-         
+
       - name: Keep Session Alive
         shell: powershell
         run: |
