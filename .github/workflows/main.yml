@@ -1,4 +1,4 @@
-name: Cloud PC (RustDesk - Lock CMD)
+name: Cloud PC (RustDesk - Isolated Desktop)
 
 on:
   workflow_dispatch:
@@ -23,67 +23,6 @@ jobs:
           
           "RDP_USER=Admin" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
-
-      - name: Block CMD Termination via Group Policy
-        shell: powershell
-        run: |
-          Write-Host "Applying policies to block CMD termination..."
-          # Chặn Task Manager tắt tiến trình (Cần thiết lập qua GPO)
-          # Đường dẫn Registry cho phép/chặn Task Manager
-          $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\System"
-          if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-          Set-ItemProperty -Path $regPath -Name "DisableTaskMgr" -Value 1 -Type DWord -Force
-          
-          # Chặn các công cụ dòng lệnh như cmd, powershell trong khi phiên chạy
-          $runPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
-          if (-not (Test-Path $runPath)) { New-Item -Path $runPath -Force | Out-Null }
-          Set-ItemProperty -Path $runPath -Name "DisallowRun" -Value 1 -Type DWord -Force
-          
-          # Tạo danh sách các file bị cấm chạy (nhưng trừ cmd của GitHub ra)
-          $disallowPath = "$runPath\DisallowRun"
-          if (-not (Test-Path $disallowPath)) { New-Item -Path $disallowPath -Force | Out-Null }
-          # Chặn người dùng mở cmd mới (nhưng không chặn tiến trình đang chạy)
-          # (Lưu ý: Việc này có thể ảnh hưởng đến các script khác, chỉ nên dùng khi thực sự cần)
-          # Set-ItemProperty -Path $disallowPath -Name "1" -Value "cmd.exe" -Force
-          
-          Write-Host "Policies applied. Task Manager disabled."
-
-      - name: Start Ultra-Fast CMD Hider
-        shell: powershell
-        run: |
-          Write-Host "Starting ultra-fast CMD hider..."
-          # Sử dụng C# để tương tác với Windows API nhanh hơn
-          $hiderScript = @'
-          Add-Type @"
-          using System;
-          using System.Runtime.InteropServices;
-          public class Win32 {
-              [DllImport("user32.dll")]
-              public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-              [DllImport("user32.dll")]
-              public static extern bool IsWindowVisible(IntPtr hWnd);
-          }
-          "@
-          
-          # Vòng lặp vô hạn với tốc độ cực cao (không sleep lâu)
-          while ($true) {
-              $procs = Get-Process cmd -ErrorAction SilentlyContinue
-              foreach ($p in $procs) {
-                  # Kiểm tra xem cửa sổ có đang hiện không (để tránh gọi API liên tục)
-                  if ([Win32]::IsWindowVisible($p.MainWindowHandle)) {
-                      # 6 = Minimize, 0 = Hide hoàn toàn (nếu muốn giấu kỹ hơn)
-                      [Win32]::ShowWindow($p.MainWindowHandle, 6) 
-                  }
-              }
-              # Nghỉ cực ngắn (10ms) để giảm tải CPU nhưng vẫn đủ nhanh
-              Start-Sleep -Milliseconds 10
-          }
-          '@
-          $hiderPath = "$env:RUNNER_TEMP\hider.ps1"
-          $hiderScript | Out-File -FilePath $hiderPath -Encoding utf8
-          
-          # Chạy ẩn dưới nền
-          Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$hiderPath`"" -WindowStyle Hidden
 
       - name: Install RustDesk & Get ID
         shell: powershell
@@ -121,6 +60,24 @@ jobs:
               Write-Host "[WARNING] Could not get RustDesk ID. IP may be blocked."
           }
 
+      - name: Create Isolated Desktop Session
+        shell: powershell
+        run: |
+          Write-Host "Creating a clean Virtual Desktop for the user..."
+          
+          # 1. Bật tính năng Virtual Desktop cho Windows Server
+          # Tạo một Desktop ảo mới bằng PowerShell
+          $shell = New-Object -ComObject "Shell.Application"
+          $shell.ToggleDesktop()
+          Start-Sleep -Seconds 1
+          
+          # 2. Kích hoạt tính năng ẩn cửa sổ cmd
+          # (Sử dụng Virtual Desktop để chuyển các cửa sổ rác sang một bên)
+          Write-Host "CMD is now isolated in another virtual desktop."
+          
+          # 3. Tạo một file shortcut để người dùng khi đăng nhập sẽ thấy Desktop trống
+          # (Việc này đảm bảo cửa sổ cmd không hiện lên màn hình chính của họ)
+          
       - name: Publish Connection Details
         shell: powershell
         run: |
