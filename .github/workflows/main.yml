@@ -60,41 +60,6 @@ jobs:
               Write-Host "[WARNING] Could not get RustDesk ID. IP may be blocked."
           }
 
-      - name: Start Bore Tunnel for RDP
-        shell: powershell
-        run: |
-          Write-Host "Downloading bore..."
-          $boreZip = "$env:RUNNER_TEMP\bore.zip"
-          curl.exe -L --fail -o $boreZip "https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-pc-windows-msvc.zip"
-          Expand-Archive -Path $boreZip -DestinationPath "$env:RUNNER_TEMP\bore" -Force
-          
-          $boreExe = (Get-ChildItem -Path "$env:RUNNER_TEMP\bore" -Filter "bore.exe" -Recurse | Select-Object -First 1).FullName
-          
-          Write-Host "Starting bore tunnel for RDP (port 3389)..."
-          $logFile = "$env:RUNNER_TEMP\bore.log"
-          Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput $logFile -WindowStyle Hidden
-          
-          Write-Host "Waiting for bore address..."
-          $boreAddress = $null
-          $attempts = 0
-          while (-not $boreAddress -and $attempts -lt 20) {
-              Start-Sleep -Seconds 2
-              if (Test-Path $logFile) {
-                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-                  if ($content -match 'bore\.pub:(\d+)') {
-                      $boreAddress = "bore.pub:$($matches[1])"
-                  }
-              }
-              $attempts++
-          }
-          
-          if ($boreAddress) {
-              "BORE_ADDR=$boreAddress" >> $env:GITHUB_ENV
-              Write-Host "Bore Address: $boreAddress"
-          } else {
-              Write-Host "[WARNING] Could not get bore address."
-          }
-
       - name: Publish Connection Details
         shell: powershell
         run: |
@@ -110,15 +75,7 @@ jobs:
               Add-Content -Path $summaryFile -Value "### RustDesk" -Encoding utf8
               Add-Content -Path $summaryFile -Value "- **Failed to get ID (IP blocked)**" -Encoding utf8
           }
-          
-          if ($env:BORE_ADDR) {
-              Add-Content -Path $summaryFile -Value "" -Encoding utf8
-              Add-Content -Path $summaryFile -Value "### RDP via Bore (Fallback)" -Encoding utf8
-              Add-Content -Path $summaryFile -Value "- **Address:** ``$env:BORE_ADDR``" -Encoding utf8
-              Add-Content -Path $summaryFile -Value "- **User:** ``Admin``" -Encoding utf8
-              Add-Content -Path $summaryFile -Value "- **Pass:** ``$env:RDP_PASS``" -Encoding utf8
-          }
-
+         
       - name: Keep Session Alive
         shell: powershell
         run: |
