@@ -1,4 +1,4 @@
-name: RDP via Cloudflare Tunnel (Windows App)
+name: Cloud PC via EasyTier LAN
 
 on:
   workflow_dispatch:
@@ -12,7 +12,6 @@ jobs:
       - name: Setup RDP & Firewall
         shell: powershell
         run: |
-          Write-Host "Setting up RDP..."
           $RPASS = "P@ssw0rd!"
           net user Admin $RPASS /add
           net localgroup "Administrators" Admin /add 2>$null
@@ -25,42 +24,64 @@ jobs:
           "RDP_USER=Admin" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
-      - name: Start Cloudflare Tunnel
+      - name: Download and Start EasyTier
         shell: powershell
-        env:
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
-          Write-Host "Downloading cloudflared..."
-          $cfExe = "$env:RUNNER_TEMP\cloudflared.exe"
-          curl.exe -L --fail -o $cfExe "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          Write-Host "Downloading EasyTier for Windows..."
+          # Tải bản EasyTier mới nhất cho Windows
+          $etUrl = "https://github.com/EasyTier/EasyTier/releases/latest/download/easytier-windows-x86_64.zip"
+          $zipPath = "$env:RUNNER_TEMP\easytier.zip"
+          curl.exe -L --fail -o $zipPath $etUrl
           
-          Write-Host "Starting Cloudflare Tunnel..."
-          Start-Process -FilePath $cfExe -ArgumentList "tunnel --no-autoupdate run --token $env:CF_TOKEN" -WindowStyle Hidden
+          Expand-Archive -Path $zipPath -DestinationPath "$env:RUNNER_TEMP\easytier" -Force
+          $etExe = (Get-ChildItem -Path "$env:RUNNER_TEMP\easytier" -Filter "easytier-core.exe" -Recurse | Select-Object -First 1).FullName
           
-          Start-Sleep -Seconds 5
-          Write-Host "[SUCCESS] Cloudflare Tunnel is running!"
+          if (-not $etExe) { throw "EasyTier executable not found." }
+          
+          Write-Host "Starting EasyTier with shared node..."
+          # Sử dụng Shared Node công cộng của EasyTier
+          # Đặt tên mạng và mật khẩu (BẠN NÊN ĐỔI ĐỂ BẢO MẬT)
+          $networkName = "hiep-rdp-network"
+          $networkSecret = "MatKhauBiMat123"
+          $sharedNode = "tcp://public.easytier.top:11010"
+          
+          Start-Process -FilePath $etExe -ArgumentList "-d --network-name $networkName --network-secret $networkSecret -p $sharedNode" -WindowStyle Hidden
+          
+          Write-Host "Waiting for EasyTier to initialize..."
+          Start-Sleep -Seconds 15
+          
+          # Lấy IP ảo được cấp
+          $etCli = (Get-ChildItem -Path "$env:RUNNER_TEMP\easytier" -Filter "easytier-cli.exe" -Recurse | Select-Object -First 1).FullName
+          $status = & $etCli node
+          Write-Host $status
+          
+          # Trích xuất IP (thường là 10.126.126.x)
+          if ($status -match '(\d+\.\d+\.\d+\.\d+)') {
+              $vpnIp = $matches[1]
+              Write-Host "VPN IP: $vpnIp"
+              "VPN_IP=$vpnIp" >> $env:GITHUB_ENV
+          }
 
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
-          Add-Content -Path $summaryFile -Value "## Kết nối RDP qua Cloudflare" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## Kết nối RDP qua EasyTier LAN" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Thông tin kết nối:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Tên miền:** ``rdp.tenmiencuaban.com`` (Thay bằng tên miền bạn đã cấu hình trên Cloudflare)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "- **VPN IP:** ``$env:VPN_IP`` (Xem log bên trên nếu trống)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **User:** ``Admin``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Pass:** ``P@ssw0rd!``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### Hướng dẫn kết nối:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "1. Cài đặt **cloudflared** trên điện thoại/máy tính." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. Chạy lệnh: ``cloudflared access tcp --hostname rdp.tenmiencuaban.com --url localhost:13389``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "3. Mở **Windows App**, nhập địa chỉ: ``localhost:13389``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "4. Nhập User và Pass ở trên." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "### Hướng dẫn:" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "1. Tải EasyTier trên máy tính/điện thoại của bạn." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "2. Chạy lệnh: ``easytier-core -d --network-name hiep-rdp-network --network-secret MatKhauBiMat123 -p tcp://public.easytier.top:11010``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "3. Dùng IP ``$env:VPN_IP`` để kết nối RDP." -Encoding utf8
 
       - name: Keep Session Alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Waiting for connection..."
+              Write-Host "[$(Get-Date)] Session Active - EasyTier LAN is running..."
               Start-Sleep -Seconds 300
           }
