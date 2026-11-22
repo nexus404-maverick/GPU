@@ -1,4 +1,4 @@
-name: Cloud PC via EasyTier LAN
+name: RDP via Serveo Tunnel
 
 on:
   workflow_dispatch:
@@ -24,80 +24,55 @@ jobs:
           "RDP_USER=Admin" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
-      - name: Download and Start EasyTier
+      - name: Start Serveo Tunnel
         shell: powershell
         run: |
-          Write-Host "Downloading EasyTier for Windows..."
-          $version = "2.6.4"
-          $etUrl = "https://github.com/EasyTier/EasyTier/releases/download/v$version/easytier-windows-x86_64-v$version.zip"
-          $zipPath = "$env:RUNNER_TEMP\easytier.zip"
+          Write-Host "Starting Serveo tunnel for RDP (port 3389)..."
+          # Sử dụng cổng 0 để Serveo tự cấp một cổng ngẫu nhiên
+          # Cờ -T để tránh lỗi pseudo-terminal trên môi trường không có terminal
+          $logFile = "$env:RUNNER_TEMP\serveo.log"
+          $errFile = "$env:RUNNER_TEMP\serveo.err"
           
-          curl.exe -L --fail -o $zipPath $etUrl
+          Start-Process -FilePath "ssh" -ArgumentList "-T -o StrictHostKeyChecking=no -R 0:localhost:3389 serveo.net" -RedirectStandardOutput $logFile -RedirectStandardError $errFile -WindowStyle Hidden
           
-          if (-not (Test-Path $zipPath)) { throw "Failed to download EasyTier." }
+          Write-Host "Waiting for Serveo to assign a public port..."
+          $serveoAddress = $null
+          $attempts = 0
           
-          Write-Host "Extracting EasyTier..."
-          $extractPath = "$env:RUNNER_TEMP\easytier_extract"
-          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-          
-          $etExe = (Get-ChildItem -Path $extractPath -Filter "easytier-core.exe" -Recurse | Select-Object -First 1).FullName
-          $etCli = (Get-ChildItem -Path $extractPath -Filter "easytier-cli.exe" -Recurse | Select-Object -First 1).FullName
-          
-          if (-not $etExe -or -not $etCli) { throw "EasyTier executables not found." }
-          
-          Write-Host "Starting EasyTier with shared node..."
-          $networkName = "hiep-rdp-network"
-          $networkSecret = "MatKhauBiMat123"
-          $sharedNode = "tcp://public.easytier.top:11010"
-          
-          Start-Process -FilePath $etExe -ArgumentList "-d --network-name $networkName --network-secret $networkSecret -p $sharedNode" -WindowStyle Hidden
-          
-          Write-Host "Waiting for EasyTier to initialize..."
-          Start-Sleep -Seconds 15
-          
-          # Lấy thông tin node và lưu vào biến
-          $status = & $etCli node
-          Write-Host "=== EasyTier Status ==="
-          Write-Host $status
-          
-          # TÌM ĐÚNG DÒNG "Interface IPv4" ĐỂ LẤY IP
-          $vpnIp = $null
-          $lines = $status -split "`n"
-          foreach ($line in $lines) {
-              if ($line -match "Interface IPv4\s*\|\s*(\d+\.\d+\.\d+\.\d+)") {
-                  $vpnIp = $matches[1]
-                  break
+          while (-not $serveoAddress -and $attempts -lt 20) {
+              Start-Sleep -Seconds 2
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+                  # Serveo in ra địa chỉ dạng "Forwarding TCP connections from serveo.net:PORT"
+                  if ($content -match 'serveo\.net:(\d+)') {
+                      $serveoAddress = "serveo.net:$($matches[1])"
+                  }
               }
+              $attempts++
           }
           
-          if ($vpnIp) {
-              Write-Host "VPN IP Found: $vpnIp"
-              "VPN_IP=$vpnIp" >> $env:GITHUB_ENV
-          } else {
-              Write-Host "[WARNING] Could not find Interface IPv4 in status."
-              "VPN_IP=Check logs manually" >> $env:GITHUB_ENV
-          }
+          if (-not $serveoAddress) { throw "Failed to get Serveo address. Check logs." }
+          
+          Write-Host "Serveo Address: $serveoAddress"
+          "SERVEO_ADDR=$serveoAddress" >> $env:GITHUB_ENV
 
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
-          Add-Content -Path $summaryFile -Value "## Kết nối RDP qua EasyTier LAN" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## Kết nối RDP qua Serveo" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Thông tin kết nối:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **VPN IP:** ``$env:VPN_IP``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value ("- **Địa chỉ:** ``" + $env:SERVEO_ADDR + "``") -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **User:** ``Admin``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Pass:** ``P@ssw0rd!``" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "### Hướng dẫn:" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "1. Cài EasyTier trên máy tính/điện thoại." -Encoding utf8
-          Add-Content -Path $summaryFile -Value "2. Chạy lệnh: ``easytier-core -d --network-name hiep-rdp-network --network-secret MatKhauBiMat123 -p tcp://public.easytier.top:11010``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "3. Dùng IP ``$env:VPN_IP`` để kết nối RDP." -Encoding utf8
+          Add-Content -Path $summaryFile -Value "> **Lưu ý:** Serveo miễn phí có thể ngắt kết nối nếu không có lưu lượng. Nếu bị ngắt, hãy chạy lại workflow." -Encoding utf8
 
       - name: Keep Session Alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - EasyTier LAN is running..."
+              Write-Host "[$(Get-Date)] Session Active - Serveo is running..."
               Start-Sleep -Seconds 300
           }
