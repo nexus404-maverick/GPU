@@ -1,4 +1,4 @@
-name: RDP via Serveo Tunnel (Debug)
+name: Cloud PC (RustDesk + Bore Fallback)
 
 on:
   workflow_dispatch:
@@ -24,54 +24,105 @@ jobs:
           "RDP_USER=Admin" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
-      - name: Start Serveo Tunnel
+      - name: Install RustDesk & Get ID
         shell: powershell
         run: |
-          Write-Host "Starting Serveo tunnel for RDP (port 3389)..."
-          $logFile = "$env:RUNNER_TEMP\serveo.log"
-          $errFile = "$env:RUNNER_TEMP\serveo.err"
+          Write-Host "Downloading RustDesk..."
+          $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
+          curl.exe -L --fail -o $msiPath "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
           
-          # Thêm -p 443 để tránh bị chặn cổng 22, dùng -T để tránh lỗi pseudo-terminal
-          Start-Process -FilePath "ssh" -ArgumentList "-T -p 443 -o StrictHostKeyChecking=no -R 0:localhost:3389 serveo.net" -RedirectStandardOutput $logFile -RedirectStandardError $errFile -WindowStyle Hidden
+          Write-Host "Installing RustDesk..."
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait
+          Start-Sleep -Seconds 15
           
-          Write-Host "Waiting for Serveo to assign a public port..."
-          Start-Sleep -Seconds 10
+          $rustdeskExe = "C:\Program Files\RustDesk\rustdesk.exe"
+          Write-Host "Applying password..."
+          & $rustdeskExe --password $env:RDP_PASS
           
-          # In toàn bộ log ra để xem Serveo báo gì
-          Write-Host "=== SERVEO STDOUT ==="
-          if (Test-Path $logFile) { Get-Content $logFile }
-          Write-Host "=== SERVEO STDERR ==="
-          if (Test-Path $errFile) { Get-Content $errFile }
-          
-          $serveoAddress = $null
-          if (Test-Path $logFile) {
-              $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-              if ($content -match 'serveo\.net:(\d+)') {
-                  $serveoAddress = "serveo.net:$($matches[1])"
+          Write-Host "Retrieving ID..."
+          $rustdeskId = $null
+          $attempts = 0
+          while (-not $rustdeskId -and $attempts -lt 10) {
+              $idOutput = & $rustdeskExe --get-id 2>&1 | Out-String
+              if ($idOutput -match '(\d{9,10})') {
+                  $rustdeskId = $matches[1]
+                  break
               }
+              Write-Host "Retrying ID..."
+              Start-Sleep -Seconds 5
+              $attempts++
           }
           
-          if (-not $serveoAddress) { 
-              Write-Host "[ERROR] Could not extract Serveo address from logs above."
-              throw "Serveo tunnel failed. Check the logs above to see why." 
+          if ($rustdeskId) {
+              "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
+              Write-Host "RustDesk ID: $rustdeskId"
+          } else {
+              Write-Host "[WARNING] Could not get RustDesk ID. IP may be blocked."
+          }
+
+      - name: Start Bore Tunnel for RDP
+        shell: powershell
+        run: |
+          Write-Host "Downloading bore..."
+          $boreZip = "$env:RUNNER_TEMP\bore.zip"
+          curl.exe -L --fail -o $boreZip "https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-pc-windows-msvc.zip"
+          Expand-Archive -Path $boreZip -DestinationPath "$env:RUNNER_TEMP\bore" -Force
+          
+          $boreExe = (Get-ChildItem -Path "$env:RUNNER_TEMP\bore" -Filter "bore.exe" -Recurse | Select-Object -First 1).FullName
+          
+          Write-Host "Starting bore tunnel for RDP (port 3389)..."
+          $logFile = "$env:RUNNER_TEMP\bore.log"
+          Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput $logFile -WindowStyle Hidden
+          
+          Write-Host "Waiting for bore address..."
+          $boreAddress = $null
+          $attempts = 0
+          while (-not $boreAddress -and $attempts -lt 20) {
+              Start-Sleep -Seconds 2
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+                  if ($content -match 'bore\.pub:(\d+)') {
+                      $boreAddress = "bore.pub:$($matches[1])"
+                  }
+              }
+              $attempts++
           }
           
-          Write-Host "Serveo Address: $serveoAddress"
-          "SERVEO_ADDR=$serveoAddress" >> $env:GITHUB_ENV
+          if ($boreAddress) {
+              "BORE_ADDR=$boreAddress" >> $env:GITHUB_ENV
+              Write-Host "Bore Address: $boreAddress"
+          } else {
+              Write-Host "[WARNING] Could not get bore address."
+          }
 
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
-          Add-Content -Path $summaryFile -Value "## Kết nối RDP qua Serveo" -Encoding utf8
-          Add-Content -Path $summaryFile -Value ("- **Địa chỉ:** ``" + $env:SERVEO_ADDR + "``") -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **User:** ``Admin``" -Encoding utf8
-          Add-Content -Path $summaryFile -Value "- **Pass:** ``P@ssw0rd!``" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## Cloud PC Connection Info" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "" -Encoding utf8
+          
+          if ($env:RUSTDESK_ID) {
+              Add-Content -Path $summaryFile -Value "### RustDesk (Recommended)" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "- **ID:** ``$env:RUSTDESK_ID``" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "- **Password:** ``$env:RDP_PASS``" -Encoding utf8
+          } else {
+              Add-Content -Path $summaryFile -Value "### RustDesk" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "- **Failed to get ID (IP blocked)**" -Encoding utf8
+          }
+          
+          if ($env:BORE_ADDR) {
+              Add-Content -Path $summaryFile -Value "" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "### RDP via Bore (Fallback)" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "- **Address:** ``$env:BORE_ADDR``" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "- **User:** ``Admin``" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "- **Pass:** ``$env:RDP_PASS``" -Encoding utf8
+          }
 
       - name: Keep Session Alive
         shell: powershell
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Session Active - Serveo is running..."
+              Write-Host "[$(Get-Date)] Session Active..."
               Start-Sleep -Seconds 300
           }
