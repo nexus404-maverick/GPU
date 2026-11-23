@@ -5,7 +5,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 360
 
     steps:
@@ -46,6 +46,12 @@ jobs:
           
           "RDP_USER=Layer7" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
+      - name: Lock Screen for Security
+        shell: powershell
+        run: |
+          Write-Host "Locking the screen..."
+          # Lệnh này sẽ khóa màn hình hiện tại (yêu cầu mật khẩu để mở)
+          rundll32.exe user32.dll,LockWorkStation
 
       # ============================================================
       # BƯỚC 2: ĐỔI HÌNH NỀN (Tự động nhận diện .jpg hoặc .png)
