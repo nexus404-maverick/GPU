@@ -16,10 +16,12 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Setting up RDP with user Layer7..."
+          
+          # Đổi sang mật khẩu đã được kiểm chứng là hợp lệ
           $RPASS = "P@ssw0rd!"
           $SecurePass = ConvertTo-SecureString $RPASS -AsPlainText -Force
           
-          # 1. Tạo user Layer7 bằng PowerShell (An toàn hơn net user)
+          # 1. Tạo user Layer7 bằng PowerShell
           $userExists = Get-LocalUser -Name "Layer7" -ErrorAction SilentlyContinue
           if (-not $userExists) {
               New-LocalUser -Name "Layer7" -Password $SecurePass -FullName "Layer7" -Description "Remote User" -PasswordNeverExpires -ErrorAction Stop
@@ -38,7 +40,7 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
           
-          # 4. Thiết lập Auto Login cho Layer7 (Tự động đăng nhập khi khởi động)
+          # 4. Thiết lập Auto Login cho Layer7 (Tự động đăng nhập)
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
           Set-ItemProperty -Path $regPath -Name "AutoAdminLogon" -Value "1" -Type String
           Set-ItemProperty -Path $regPath -Name "DefaultUsername" -Value "Layer7" -Type String
@@ -128,7 +130,7 @@ jobs:
           }
 
       # ============================================================
-      # BƯỚC 4: ÉP PHIÊN LÀM VIỆC SANG LAYER7 (Chạy ngầm)
+      # BƯỚC 4: ÉP PHIÊN LÀM VIỆC SANG LAYER7
       # ============================================================
       - name: Force Session to Layer7
         shell: powershell
