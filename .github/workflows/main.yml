@@ -16,8 +16,6 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Setting up RDP with user Layer7..."
-          
-          # Đổi sang mật khẩu đã được kiểm chứng là hợp lệ
           $RPASS = "P@ssw0rd!"
           $SecurePass = ConvertTo-SecureString $RPASS -AsPlainText -Force
           
@@ -40,7 +38,7 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
           
-          # 4. Thiết lập Auto Login cho Layer7 (Tự động đăng nhập)
+          # 4. Thiết lập Auto Login cho Layer7
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
           Set-ItemProperty -Path $regPath -Name "AutoAdminLogon" -Value "1" -Type String
           Set-ItemProperty -Path $regPath -Name "DefaultUsername" -Value "Layer7" -Type String
@@ -50,14 +48,22 @@ jobs:
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
 
       # ============================================================
-      # BƯỚC 2: ĐỔI HÌNH NỀN CHO CẢ ADMIN VÀ LAYER7
+      # BƯỚC 2: ĐỔI HÌNH NỀN (Tự động nhận diện .jpg hoặc .png)
       # ============================================================
       - name: Set Windows Wallpaper
         shell: powershell
         run: |
-          $Wallpaper = "$env:GITHUB_WORKSPACE\Wallpaper\wallpaper.jpg"
+          $WallpaperJpg = "$env:GITHUB_WORKSPACE\Wallpaper\wallpaper.jpg"
+          $WallpaperPng = "$env:GITHUB_WORKSPACE\Wallpaper\wallpaper.png"
+          $Wallpaper = $null
 
-          if (Test-Path $Wallpaper) {
+          # Tìm file ảnh (ưu tiên .jpg, nếu không có thì tìm .png)
+          if (Test-Path $WallpaperJpg) { $Wallpaper = $WallpaperJpg }
+          elseif (Test-Path $WallpaperPng) { $Wallpaper = $WallpaperPng }
+
+          if ($Wallpaper) {
+              Write-Host "Found wallpaper: $Wallpaper"
+              
               # 1. Tắt chính sách chặn hình nền trên RDP
               $tsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
               if (!(Test-Path $tsPolicy)) { New-Item -Path $tsPolicy -Force | Out-Null }
@@ -68,7 +74,7 @@ jobs:
               Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name WallpaperStyle -Value "10"
               Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name TileWallpaper -Value "0"
 
-              # 3. Đổi hình nền cho User Layer7 (Bằng cách load file cấu hình mặc định)
+              # 3. Đổi hình nền cho User Layer7 (Load Default User)
               try {
                   reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
                   $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
@@ -81,13 +87,13 @@ jobs:
                   Write-Host "[WARNING] Could not update default user wallpaper."
               }
 
-              # 4. Làm mới để áp dụng ngay lập tức cho phiên hiện tại
+              # 4. Làm mới
               Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class WallpaperSetter { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
               [WallpaperSetter]::SystemParametersInfo(20, 0, $Wallpaper, 3)
 
               Write-Host "Wallpaper set successfully!"
           } else {
-              Write-Error "Wallpaper.jpg not found!"
+              Write-Warning "Không tìm thấy file wallpaper.jpg hoặc wallpaper.png trong thư mục Wallpaper. Bỏ qua bước đổi hình nền."
           }
 
       # ============================================================
@@ -136,12 +142,10 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Attempting to switch active session to Layer7..."
-          
-          # Lấy ID phiên hiện tại của runneradmin
           $currentSession = (Get-Process -Id $PID).SessionId
           Write-Host "Current session ID: $currentSession"
           
-          # Tạo một task để chạy tscon sau 10 giây
+          # Tạo task chạy tscon sau 10s
           $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c tscon $currentSession /dest:console"
           $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
           Register-ScheduledTask -TaskName "SwitchToLayer7" -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest -Force
