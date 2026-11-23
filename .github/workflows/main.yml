@@ -17,24 +17,28 @@ jobs:
         run: |
           Write-Host "Setting up RDP with user Layer7..."
           $RPASS = "Layer7@2026"
+          $SecurePass = ConvertTo-SecureString $RPASS -AsPlainText -Force
           
-          # Tạo user Layer7
+          # 1. Tạo user Layer7 bằng PowerShell (An toàn hơn net user)
           $userExists = Get-LocalUser -Name "Layer7" -ErrorAction SilentlyContinue
           if (-not $userExists) {
-              net user Layer7 $RPASS /add
+              New-LocalUser -Name "Layer7" -Password $SecurePass -FullName "Layer7" -Description "Remote User" -PasswordNeverExpires -ErrorAction Stop
+              Write-Host "User Layer7 created successfully."
           } else {
-              Set-LocalUser -Name "Layer7" -Password (ConvertTo-SecureString $RPASS -AsPlainText -Force)
+              Set-LocalUser -Name "Layer7" -Password $SecurePass -PasswordNeverExpires $true
+              Write-Host "User Layer7 password updated."
           }
-          net localgroup "Administrators" Layer7 /add 2>$null
-          net localgroup "Remote Desktop Users" Layer7 /add 2>$null
-          Set-LocalUser -Name "Layer7" -PasswordNeverExpires $true
           
-          # Cấu hình RDP
+          # 2. Thêm vào nhóm quyền
+          Add-LocalGroupMember -Group "Administrators" -Member "Layer7" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Layer7" -ErrorAction SilentlyContinue
+          
+          # 3. Cấu hình RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
           
-          # Thiết lập Auto Login cho Layer7 (để tự động đăng nhập khi khởi động)
+          # 4. Thiết lập Auto Login cho Layer7 (Tự động đăng nhập khi khởi động)
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
           Set-ItemProperty -Path $regPath -Name "AutoAdminLogon" -Value "1" -Type String
           Set-ItemProperty -Path $regPath -Name "DefaultUsername" -Value "Layer7" -Type String
@@ -135,7 +139,7 @@ jobs:
           $currentSession = (Get-Process -Id $PID).SessionId
           Write-Host "Current session ID: $currentSession"
           
-          # Tạo một task để chạy tscon sau 10 giây (để workflow kịp chạy xong)
+          # Tạo một task để chạy tscon sau 10 giây
           $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c tscon $currentSession /dest:console"
           $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
           Register-ScheduledTask -TaskName "SwitchToLayer7" -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest -Force
