@@ -181,6 +181,17 @@ jobs:
           } else {
               Write-Host "-> [WARNING] Could not get RustDesk ID. IP may be blocked."
           }
+      - name: Switch Windows Session to Layer7
+        shell: powershell
+        run: |
+          $Script = "$env:GITHUB_WORKSPACE\scripts\switch-user.ps1"
+
+          if (!(Test-Path $Script)) {
+              Write-Error "switch-user.ps1 not found!"
+              exit 1
+          }
+
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Script
 
       # ============================================================
       # BƯỚC 6: ÉP PHIÊN LÀM VIỆC VỀ MÀN HÌNH LOGIN LAYER7 (Tùy chọn)
