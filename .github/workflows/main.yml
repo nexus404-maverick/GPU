@@ -1,86 +1,99 @@
-name: Cloud PC (RustDesk - Layer7 & Wallpaper)
+name: Cloud PC (RustDesk - Layer7 Complete)
 
 on:
   workflow_dispatch:
+    inputs:
+      auto_switch:
+        description: 'Tự động chuyển sang màn hình Login Layer7 (có thể làm rớt session)'
+        type: boolean
+        default: true
 
 jobs:
   deploy:
-    runs-on: windows-2025
+    runs-on: windows-2022
     timeout-minutes: 360
 
     steps:
+      # ============================================================
+      # BƯỚC 0: LẤY SOURCE CODE (Cần thiết để đọc thư mục scripts/ và Wallpaper/)
+      # ============================================================
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       # ============================================================
       # BƯỚC 1: TẠO USER LAYER7 & CẤU HÌNH RDP
       # ============================================================
       - name: Setup RDP & Create User Layer7
         shell: powershell
         run: |
-          Write-Host "Setting up RDP with user Layer7..."
+          Write-Host "=== Setting up RDP with user Layer7 ==="
           $RPASS = "P@ssw0rd!"
           $SecurePass = ConvertTo-SecureString $RPASS -AsPlainText -Force
           
-          # 1. Tạo user Layer7 bằng PowerShell
+          # 1. Tạo user Layer7
           $userExists = Get-LocalUser -Name "Layer7" -ErrorAction SilentlyContinue
           if (-not $userExists) {
               New-LocalUser -Name "Layer7" -Password $SecurePass -FullName "Layer7" -Description "Remote User" -PasswordNeverExpires -ErrorAction Stop
-              Write-Host "User Layer7 created successfully."
+              Write-Host "-> User Layer7 created successfully."
           } else {
               Set-LocalUser -Name "Layer7" -Password $SecurePass -PasswordNeverExpires $true
-              Write-Host "User Layer7 password updated."
+              Write-Host "-> User Layer7 password updated."
           }
           
-          # 2. Thêm vào nhóm quyền
+          # 2. Cấp quyền
           Add-LocalGroupMember -Group "Administrators" -Member "Layer7" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Layer7" -ErrorAction SilentlyContinue
           
-          # 3. Cấu hình RDP
+          # 3. Bật RDP và tắt Firewall
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
           
-          # 4. Thiết lập Auto Login cho Layer7
-          $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-          Set-ItemProperty -Path $regPath -Name "AutoAdminLogon" -Value "1" -Type String
-          Set-ItemProperty -Path $regPath -Name "DefaultUsername" -Value "Layer7" -Type String
-          Set-ItemProperty -Path $regPath -Name "DefaultPassword" -Value $RPASS -Type String
-          
+          # 4. Lưu vào biến môi trường
           "RDP_USER=Layer7" >> $env:GITHUB_ENV
           "RDP_PASS=$RPASS" >> $env:GITHUB_ENV
-      - name: Lock Screen for Security
-        shell: powershell
-        run: |
-          Write-Host "Locking the screen..."
-          # Lệnh này sẽ khóa màn hình hiện tại (yêu cầu mật khẩu để mở)
-          rundll32.exe user32.dll,LockWorkStation
 
       # ============================================================
-      # BƯỚC 2: ĐỔI HÌNH NỀN (Tự động nhận diện .jpg hoặc .png)
+      # BƯỚC 2: ÉP MÀN HÌNH LOGIN CHỌN SẴN USER LAYER7
+      # ============================================================
+      - name: Force Login Screen to Show Layer7
+        shell: powershell
+        run: |
+          Write-Host "=== Forcing Login Screen to Layer7 ==="
+          $logonUiPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI"
+          if (-not (Test-Path $logonUiPath)) { New-Item -Path $logonUiPath -Force | Out-Null }
+          Set-ItemProperty -Path $logonUiPath -Name "LastLoggedOnUser" -Value "Layer7" -Type String
+          Set-ItemProperty -Path $logonUiPath -Name "LastLoggedOnSAMUser" -Value "Layer7" -Type String
+          
+          # Tắt màn hình khóa (Lock Screen) để hiện thẳng màn hình đăng nhập
+          $personalizationPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
+          if (-not (Test-Path $personalizationPath)) { New-Item -Path $personalizationPath -Force | Out-Null }
+          Set-ItemProperty -Path $personalizationPath -Name "NoLockScreen" -Value 1 -Type DWord -Force
+          Write-Host "-> Login screen will default to Layer7."
+
+      # ============================================================
+      # BƯỚC 3: ĐỔI HÌNH NỀN (Hỗ trợ cả .jpg và .png)
       # ============================================================
       - name: Set Windows Wallpaper
         shell: powershell
         run: |
+          Write-Host "=== Setting Wallpaper ==="
           $WallpaperJpg = "$env:GITHUB_WORKSPACE\Wallpaper\wallpaper.jpg"
           $WallpaperPng = "$env:GITHUB_WORKSPACE\Wallpaper\wallpaper.png"
           $Wallpaper = $null
-
-          # Tìm file ảnh (ưu tiên .jpg, nếu không có thì tìm .png)
+          
           if (Test-Path $WallpaperJpg) { $Wallpaper = $WallpaperJpg }
           elseif (Test-Path $WallpaperPng) { $Wallpaper = $WallpaperPng }
-
+          
           if ($Wallpaper) {
-              Write-Host "Found wallpaper: $Wallpaper"
+              Write-Host "-> Found wallpaper: $Wallpaper"
               
-              # 1. Tắt chính sách chặn hình nền trên RDP
+              # Tắt chính sách chặn hình nền trên RDP
               $tsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
               if (!(Test-Path $tsPolicy)) { New-Item -Path $tsPolicy -Force | Out-Null }
               Set-ItemProperty -Path $tsPolicy -Name "fNoRemoteDesktopWallpaper" -Value 0 -Type DWord -Force
-
-              # 2. Đổi hình nền cho user hiện tại (runneradmin)
-              Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name Wallpaper -Value $Wallpaper
-              Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name WallpaperStyle -Value "10"
-              Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name TileWallpaper -Value "0"
-
-              # 3. Đổi hình nền cho User Layer7 (Load Default User)
+              
+              # Set cho Default User (áp dụng cho mọi user mới, bao gồm Layer7)
               try {
                   reg load "HKU\DefaultUser" "C:\Users\Default\NTUSER.DAT" | Out-Null
                   $DefaultRegPath = "Registry::HKEY_USERS\DefaultUser\Control Panel\Desktop"
@@ -88,84 +101,115 @@ jobs:
                   Set-ItemProperty -Path $DefaultRegPath -Name WallpaperStyle -Value "10"
                   Set-ItemProperty -Path $DefaultRegPath -Name TileWallpaper -Value "0"
                   reg unload "HKU\DefaultUser" | Out-Null
-                  Write-Host "Default user wallpaper updated."
+                  Write-Host "-> Default user wallpaper updated."
               } catch {
-                  Write-Host "[WARNING] Could not update default user wallpaper."
+                  Write-Host "-> [WARNING] Could not update default user wallpaper."
               }
-
-              # 4. Làm mới
-              Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class WallpaperSetter { [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
-              [WallpaperSetter]::SystemParametersInfo(20, 0, $Wallpaper, 3)
-
-              Write-Host "Wallpaper set successfully!"
+              
+              Write-Host "-> Wallpaper set successfully."
           } else {
-              Write-Warning "Không tìm thấy file wallpaper.jpg hoặc wallpaper.png trong thư mục Wallpaper. Bỏ qua bước đổi hình nền."
+              Write-Host "-> [SKIP] No wallpaper found in 'Wallpaper' folder."
           }
 
       # ============================================================
-      # BƯỚC 3: CÀI ĐẶT RUSTDESK & LẤY ID
+      # BƯỚC 4: CHẠY SCRIPT TÙY CHỈNH DƯỚI QUYỀN LAYER7
+      # ============================================================
+      - name: Run Custom Scripts as Layer7
+        shell: powershell
+        run: |
+          Write-Host "=== Running Custom Scripts as Layer7 ==="
+          $Username = ".\Layer7"
+          $Password = ConvertTo-SecureString "${{ env.RDP_PASS }}" -AsPlainText -Force
+          $Credential = New-Object System.Management.Automation.PSCredential($Username, $Password)
+          
+          $ScriptsFolder = "$env:GITHUB_WORKSPACE\scripts"
+          
+          if (Test-Path $ScriptsFolder) {
+              $Scripts = Get-ChildItem -Path $ScriptsFolder -Filter "*.ps1" -ErrorAction SilentlyContinue
+              if ($Scripts.Count -eq 0) {
+                  Write-Host "-> [SKIP] No .ps1 files found in 'scripts' folder."
+              } else {
+                  foreach ($Script in $Scripts) {
+                      Write-Host "-> Executing: $($Script.Name)"
+                      try {
+                          Start-Process powershell.exe `
+                            -Credential $Credential `
+                            -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($Script.FullName)`"" `
+                            -WindowStyle Hidden -Wait -ErrorAction Stop
+                          Write-Host "-> [OK] $($Script.Name) completed."
+                      } catch {
+                          Write-Host "-> [ERROR] $($Script.Name) failed: $_"
+                      }
+                  }
+              }
+          } else {
+              Write-Host "-> [SKIP] 'scripts' folder does not exist."
+          }
+
+      # ============================================================
+      # BƯỚC 5: CÀI ĐẶT RUSTDESK & LẤY ID
       # ============================================================
       - name: Install RustDesk & Get ID
         shell: powershell
         run: |
-          Write-Host "Downloading RustDesk..."
+          Write-Host "=== Installing RustDesk ==="
           $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
           curl.exe -L --fail -o $msiPath "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
           
-          Write-Host "Installing RustDesk..."
           Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait
           Start-Sleep -Seconds 15
           
           $rustdeskExe = "C:\Program Files\RustDesk\rustdesk.exe"
-          Write-Host "Applying password..."
           & $rustdeskExe --password $env:RDP_PASS
           
-          Write-Host "Retrieving ID..."
           $rustdeskId = $null
           $attempts = 0
-          while (-not $rustdeskId -and $attempts -lt 10) {
+          while (-not $rustdeskId -and $attempts -lt 15) {
               $idOutput = & $rustdeskExe --get-id 2>&1 | Out-String
               if ($idOutput -match '(\d{9,10})') {
                   $rustdeskId = $matches[1]
                   break
               }
-              Write-Host "Retrying ID..."
+              Write-Host "-> Retrying ID... ($($attempts+1)/15)"
               Start-Sleep -Seconds 5
               $attempts++
           }
           
           if ($rustdeskId) {
               "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
-              Write-Host "RustDesk ID: $rustdeskId"
+              Write-Host "-> RustDesk ID: $rustdeskId"
           } else {
-              Write-Host "[WARNING] Could not get RustDesk ID. IP may be blocked."
+              Write-Host "-> [WARNING] Could not get RustDesk ID. IP may be blocked."
           }
 
       # ============================================================
-      # BƯỚC 4: ÉP PHIÊN LÀM VIỆC SANG LAYER7
+      # BƯỚC 6: ÉP PHIÊN LÀM VIỆC VỀ MÀN HÌNH LOGIN LAYER7 (Tùy chọn)
       # ============================================================
-      - name: Force Session to Layer7
+      - name: Force Switch to Layer7 Login
+        if: ${{ inputs.auto_switch == true }}
         shell: powershell
         run: |
-          Write-Host "Attempting to switch active session to Layer7..."
+          Write-Host "=== Scheduling Session Switch to Login Screen ==="
           $currentSession = (Get-Process -Id $PID).SessionId
-          Write-Host "Current session ID: $currentSession"
+          Write-Host "-> Current Session ID: $currentSession"
           
-          # Tạo task chạy tscon sau 10s
+          # Tạo task chạy ngầm để ngắt phiên runneradmin, đưa về Login Screen
           $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c tscon $currentSession /dest:console"
-          $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
-          Register-ScheduledTask -TaskName "SwitchToLayer7" -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest -Force
+          $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(20)
           
-          Write-Host "Scheduled session switch in 10 seconds."
+          Register-ScheduledTask -TaskName "ForceLoginScreen" -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest -Force
+          
+          Write-Host "-> Session will switch to Login Screen in 20 seconds."
+          Write-Host "-> WARNING: This may disconnect the runner. Be ready to reconnect via RustDesk."
 
       # ============================================================
-      # BƯỚC 5: XUẤT THÔNG TIN KẾT NỐI
+      # BƯỚC 7: XUẤT THÔNG TIN KẾT NỐI
       # ============================================================
       - name: Publish Connection Details
         shell: powershell
         run: |
           $summaryFile = $env:GITHUB_STEP_SUMMARY
-          Add-Content -Path $summaryFile -Value "## Cloud PC (Auto Login: Layer7)" -Encoding utf8
+          Add-Content -Path $summaryFile -Value "## Cloud PC (Layer7)" -Encoding utf8
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           Add-Content -Path $summaryFile -Value "### Thông tin kết nối:" -Encoding utf8
           Add-Content -Path $summaryFile -Value "- **Username:** ``Layer7``" -Encoding utf8
@@ -173,12 +217,17 @@ jobs:
           Add-Content -Path $summaryFile -Value "" -Encoding utf8
           
           if ($env:RUSTDESK_ID) {
-              Add-Content -Path $summaryFile -Value "### RustDesk ID:" -Encoding utf8
-              Add-Content -Path $summaryFile -Value "- ``$env:RUSTDESK_ID``" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "### RustDesk:" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "- **ID:** ``$env:RUSTDESK_ID``" -Encoding utf8
+          }
+          
+          if ("${{ inputs.auto_switch }}" -eq "true") {
+              Add-Content -Path $summaryFile -Value "" -Encoding utf8
+              Add-Content -Path $summaryFile -Value "> **Lưu ý:** Màn hình sẽ tự động chuyển về Login của Layer7 sau 20s. Hãy kết nối qua RustDesk, đợi màn hình Login hiện ra và nhập mật khẩu để vào." -Encoding utf8
           }
 
       # ============================================================
-      # BƯỚC 6: GIỮ SESSION SỐNG
+      # BƯỚC 8: GIỮ SESSION SỐNG
       # ============================================================
       - name: Keep Session Alive
         shell: powershell
