@@ -87,6 +87,53 @@ jobs:
           Set-ItemProperty -Path $Path `
             -Name "LastLoggedOnSAMUser" `
             -Value "$env:COMPUTERNAME\Layer7"
+      
+      - name: Initialize Layer7 User Profile
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $User = "$env:COMPUTERNAME\Layer7"
+          $Account = New-Object System.Security.Principal.NTAccount($User)
+          $Sid = $Account.Translate([System.Security.Principal.SecurityIdentifier]).Value
+
+          $ProfileList = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid"
+
+          $Profile = Get-CimInstance Win32_UserProfile |
+              Where-Object { $_.SID -eq $Sid }
+
+          if (-not $Profile) {
+              $null = New-Item -Path $ProfileList -Force
+
+              $ProfilePath = "C:\Users\Layer7"
+
+              New-ItemProperty -Path $ProfileList `
+                  -Name ProfileImagePath `
+                  -Value $ProfilePath `
+                  -PropertyType ExpandString `
+                  -Force | Out-Null
+
+              $Password = ConvertTo-SecureString "${{ secrets.LAYER7_PASSWORD }}" -AsPlainText -Force
+              $Credential = New-Object System.Management.Automation.PSCredential($User, $Password)
+
+              $Process = Start-Process -FilePath "powershell.exe" `
+                  -Credential $Credential `
+                  -ArgumentList "-NoProfile -Command `"Write-Output 'Layer7 profile initialized'`"" `
+                  -Wait -PassThru
+
+              if ($Process.ExitCode -ne 0) {
+                  throw "Không thể khởi tạo profile Layer7."
+              }
+          }
+
+          $ProfilePath = (Get-ItemProperty -Path $ProfileList -Name ProfileImagePath).ProfileImagePath
+          $ProfilePath = [Environment]::ExpandEnvironmentVariables($ProfilePath)
+
+          if (-not (Test-Path "$ProfilePath\NTUSER.DAT")) {
+              throw "Profile Layer7 chưa được tạo: $ProfilePath"
+          }
+
+          Write-Host "Layer7 profile: $ProfilePath"
 
       # 5. Set Wallpaper
       - name: Setup Layer7 Wallpaper
