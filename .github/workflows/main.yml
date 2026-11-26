@@ -89,17 +89,9 @@ jobs:
             -Value "$env:COMPUTERNAME\Layer7"
 
       # 5. Set Wallpaper
-      - name: Set Layer7 Wallpaper
-        shell: powershell
-        run: |
-          $Script = "$env:GITHUB_WORKSPACE\scripts\set-wallpaper.ps1"
-
-          if (Test-Path $Script) {
-              & $Script
-          }
-          else {
-              Write-Host "Wallpaper script not found."
-          }
+      - name: Setup Layer7 Wallpaper
+        shell: pwsh
+        run: ./scripts/set-wallpaper.ps1
 
       # 6. Install RustDesk
       - name: Install RustDesk
