@@ -133,6 +133,11 @@ jobs:
 
           Write-Host "Layer7 SID: $Sid"
           Write-Host "Profile: $($Profile.LocalPath)"
+      - name: Verify
+        shell: powershell
+        run: |
+          whoami
+          $env:USERNAME
 
       # 5. Bật Remote Desktop
       - name: Configure Remote Desktop
