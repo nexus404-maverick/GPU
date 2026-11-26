@@ -1,5 +1,5 @@
 
-name: Layer7 Cloud PC
+name: pc lùa gà
 
 on:
   workflow_dispatch:
