@@ -1,249 +1,384 @@
 
-name: Layer7 Cloud PC - Windows Server 2025
+name: Layer7 Cloud PC
 
 on:
   workflow_dispatch:
-    inputs:
-      auto_switch:
-        description: "Đưa phiên hiện tại về màn hình đăng nhập"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
+concurrency:
+  group: layer7-cloud-pc
+  cancel-in-progress: false
+
 jobs:
-  deploy:
+  cloud-pc:
+    name: Build Layer7 Cloud PC
     runs-on: windows-2025
     timeout-minutes: 360
 
     steps:
-      # 1. Checkout
-      - name: Checkout Repository
+      # 1. Lấy mã nguồn
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Setup Layer7 User
-      - name: Setup Layer7 User
-        shell: powershell
+      # 2. Kiểm tra môi trường Windows
+      - name: Build Windows Environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "       LAYER7 CLOUD PC BUILD"
+          Write-Host "========================================"
+
+          Write-Host "Computer: $env:COMPUTERNAME"
+          Write-Host "User: $env:USERNAME"
+
+          Get-ComputerInfo |
+            Select-Object WindowsProductName, WindowsVersion, OsArchitecture |
+            Format-List
+
+          if (-not (Test-Path "$env:GITHUB_WORKSPACE\scripts")) {
+              throw "Không tìm thấy thư mục scripts."
+          }
+
+      # 3. Tạo tài khoản Layer7
+      - name: Create Layer7 User
+        shell: pwsh
         env:
           LAYER7_PASSWORD: ${{ secrets.LAYER7_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
 
           if ([string]::IsNullOrWhiteSpace($env:LAYER7_PASSWORD)) {
-              throw "Missing LAYER7_PASSWORD secret"
+              throw "Thiếu GitHub Secret LAYER7_PASSWORD."
           }
 
-          $Password = ConvertTo-SecureString $env:LAYER7_PASSWORD -AsPlainText -Force
+          $Password = ConvertTo-SecureString `
+            $env:LAYER7_PASSWORD -AsPlainText -Force
 
           $User = Get-LocalUser -Name "Layer7" -ErrorAction SilentlyContinue
 
-          if (!$User) {
-              New-LocalUser -Name "Layer7" `
+          if (-not $User) {
+              New-LocalUser `
+                -Name "Layer7" `
                 -Password $Password `
-                -FullName "Layer7" `
-                -Description "Layer7 Cloud PC" `
-                -PasswordNeverExpires
+                -Description "Layer7 Cloud PC User" `
+                -PasswordNeverExpires | Out-Null
           }
           else {
               Set-LocalUser -Name "Layer7" -Password $Password
-              Enable-LocalUser -Name "Layer7"
           }
 
-          Add-LocalGroupMember -Group "Administrators" -Member "Layer7" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Layer7" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "Layer7" `
+            -ErrorAction SilentlyContinue
 
-          Write-Host "Layer7 user configured."
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "Layer7" `
+            -ErrorAction SilentlyContinue
 
-      # 3. Setup RDP
-      - name: Configure RDP
-        shell: powershell
-        run: |
-          Set-ItemProperty `
-            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
-            -Name "fDenyTSConnections" -Value 0
+          Write-Host "Layer7 account ready."
 
-          Set-ItemProperty `
-            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "UserAuthentication" -Value 1
-
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-
-          Write-Host "RDP configured."
-
-      # 4. Configure Login Screen
-      - name: Configure Layer7 Login
-        shell: powershell
-        run: |
-          $Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI"
-
-          if (!(Test-Path $Path)) {
-              New-Item -Path $Path -Force | Out-Null
-          }
-
-          Set-ItemProperty -Path $Path `
-            -Name "LastLoggedOnUser" -Value ".\Layer7"
-
-          Set-ItemProperty -Path $Path `
-            -Name "LastLoggedOnSAMUser" `
-            -Value "$env:COMPUTERNAME\Layer7"
-      
-      - name: Initialize Layer7 User Profile
+      # 4. Khởi tạo profile Windows cho Layer7
+      - name: Initialize Layer7 Profile
         shell: pwsh
+        env:
+          LAYER7_PASSWORD: ${{ secrets.LAYER7_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $User = "$env:COMPUTERNAME\Layer7"
-          $Account = New-Object System.Security.Principal.NTAccount($User)
-          $Sid = $Account.Translate([System.Security.Principal.SecurityIdentifier]).Value
+          $Account = New-Object System.Security.Principal.NTAccount(
+              "$env:COMPUTERNAME\Layer7"
+          )
 
-          $ProfileList = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid"
+          $Sid = $Account.Translate(
+              [System.Security.Principal.SecurityIdentifier]
+          ).Value
 
           $Profile = Get-CimInstance Win32_UserProfile |
               Where-Object { $_.SID -eq $Sid }
 
           if (-not $Profile) {
-              $null = New-Item -Path $ProfileList -Force
+              $Password = ConvertTo-SecureString `
+                $env:LAYER7_PASSWORD -AsPlainText -Force
 
-              $ProfilePath = "C:\Users\Layer7"
+              $Credential = New-Object System.Management.Automation.PSCredential(
+                  "$env:COMPUTERNAME\Layer7",
+                  $Password
+              )
 
-              New-ItemProperty -Path $ProfileList `
-                  -Name ProfileImagePath `
-                  -Value $ProfilePath `
-                  -PropertyType ExpandString `
-                  -Force | Out-Null
-
-              $Password = ConvertTo-SecureString "${{ secrets.LAYER7_PASSWORD }}" -AsPlainText -Force
-              $Credential = New-Object System.Management.Automation.PSCredential($User, $Password)
-
-              $Process = Start-Process -FilePath "powershell.exe" `
-                  -Credential $Credential `
-                  -ArgumentList "-NoProfile -Command `"Write-Output 'Layer7 profile initialized'`"" `
-                  -Wait -PassThru
+              $Process = Start-Process `
+                -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+                -Credential $Credential `
+                -LoadUserProfile `
+                -ArgumentList "-NoProfile -Command `"Write-Output 'Layer7 profile initialized'`"" `
+                -Wait `
+                -PassThru
 
               if ($Process.ExitCode -ne 0) {
                   throw "Không thể khởi tạo profile Layer7."
               }
           }
 
-          $ProfilePath = (Get-ItemProperty -Path $ProfileList -Name ProfileImagePath).ProfileImagePath
-          $ProfilePath = [Environment]::ExpandEnvironmentVariables($ProfilePath)
+          $Profile = Get-CimInstance Win32_UserProfile |
+              Where-Object { $_.SID -eq $Sid }
 
-          if (-not (Test-Path "$ProfilePath\NTUSER.DAT")) {
-              throw "Profile Layer7 chưa được tạo: $ProfilePath"
+          if (-not $Profile -or -not (Test-Path "$($Profile.LocalPath)\NTUSER.DAT")) {
+              throw "Windows chưa tạo thành công profile Layer7."
           }
 
-          Write-Host "Layer7 profile: $ProfilePath"
+          Write-Host "Layer7 SID: $Sid"
+          Write-Host "Profile: $($Profile.LocalPath)"
 
-      # 5. Set Wallpaper
-      - name: Setup Layer7 Wallpaper
+      # 5. Bật Remote Desktop
+      - name: Configure Remote Desktop
         shell: pwsh
-        run: ./scripts/set-wallpaper.ps1
+        run: |
+          $ErrorActionPreference = "Stop"
 
-      # 6. Install RustDesk
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "Remote Desktop configured."
+
+      # 6. Cài đặt RustDesk
       - name: Install RustDesk
-        shell: powershell
+        shell: pwsh
         env:
           RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $Msi = "$env:RUNNER_TEMP\rustdesk.msi"
+          if ([string]::IsNullOrWhiteSpace($env:RUSTDESK_PASSWORD)) {
+              throw "Thiếu GitHub Secret RUSTDESK_PASSWORD."
+          }
+
+          $DownloadDirectory = "$env:RUNNER_TEMP\Layer7"
+          New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
+
+          Write-Host "Getting latest RustDesk release..."
+
+          $Release = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/rustdesk/rustdesk/releases/latest" `
+            -Headers @{ "User-Agent" = "Layer7-Cloud-PC" }
+
+          $Asset = $Release.assets |
+            Where-Object {
+              $_.name -match 'x86_64\.exe$'
+            } |
+            Select-Object -First 1
+
+          if (-not $Asset) {
+              throw "Không tìm thấy bộ cài RustDesk Windows x86_64."
+          }
+
+          $Installer = Join-Path $DownloadDirectory "rustdesk-installer.exe"
 
           Invoke-WebRequest `
-            -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi" `
-            -OutFile $Msi
+            -Uri $Asset.browser_download_url `
+            -OutFile $Installer
 
-          Start-Process msiexec.exe `
-            -ArgumentList "/i `"$Msi`" /qn /norestart" `
+          if (-not (Test-Path $Installer)) {
+              throw "Tải RustDesk thất bại."
+          }
+
+          Write-Host "Installing RustDesk..."
+
+          $InstallProcess = Start-Process `
+            -FilePath $Installer `
+            -ArgumentList "--silent-install" `
+            -Wait `
+            -PassThru
+
+          if ($InstallProcess.ExitCode -ne 0) {
+              throw "RustDesk installer returned exit code $($InstallProcess.ExitCode)."
+          }
+
+          Start-Sleep -Seconds 20
+
+          $RustDeskPath = "$env:ProgramFiles\RustDesk\rustdesk.exe"
+
+          if (-not (Test-Path $RustDeskPath)) {
+              $RustDeskPath = "${env:ProgramFiles(x86)}\RustDesk\rustdesk.exe"
+          }
+
+          if (-not (Test-Path $RustDeskPath)) {
+              throw "Không tìm thấy rustdesk.exe sau khi cài đặt."
+          }
+
+          # Cài đặt Windows Service
+          Start-Process `
+            -FilePath $RustDeskPath `
+            -ArgumentList "--install-service" `
             -Wait
 
-          Start-Sleep -Seconds 15
+          Start-Sleep -Seconds 10
 
-          $Exe = "C:\Program Files\RustDesk\rustdesk.exe"
+          $Service = Get-Service -Name "RustDesk" -ErrorAction SilentlyContinue
 
-          if (!(Test-Path $Exe)) {
-              throw "RustDesk installation failed."
+          if (-not $Service) {
+              throw "Không tìm thấy dịch vụ RustDesk."
           }
 
-          if ([string]::IsNullOrWhiteSpace($env:RUSTDESK_PASSWORD)) {
-              throw "Missing RUSTDESK_PASSWORD secret."
+          if ($Service.Status -ne "Running") {
+              Start-Service -Name "RustDesk"
           }
 
-          & $Exe --password $env:RUSTDESK_PASSWORD
+          # Thiết lập mật khẩu truy cập
+          Start-Process `
+            -FilePath $RustDeskPath `
+            -ArgumentList @("--password", $env:RUSTDESK_PASSWORD) `
+            -Wait
 
-          $ID = $null
+          Start-Sleep -Seconds 10
 
-          for ($i = 0; $i -lt 15; $i++) {
-              $Output = & $Exe --get-id 2>&1 | Out-String
+          # Lấy ID RustDesk
+          $RustDeskID = ""
 
-              if ($Output -match '(\d{9,10})') {
-                  $ID = $matches[1]
+          for ($i = 1; $i -le 12; $i++) {
+              $RustDeskID = (& $RustDeskPath --get-id 2>&1 | Out-String).Trim()
+
+              if ($RustDeskID -match '^[0-9]+$') {
                   break
               }
 
               Start-Sleep -Seconds 5
           }
 
-          if ($ID) {
-              "RUSTDESK_ID=$ID" >> $env:GITHUB_ENV
-              Write-Host "RustDesk ID: $ID"
-          }
-          else {
-              Write-Warning "RustDesk ID unavailable."
+          if ($RustDeskID -notmatch '^[0-9]+$') {
+              throw "Không lấy được RustDesk ID."
           }
 
-      # 7. Optional login screen switch
-      - name: Switch to Console
-        if: ${{ inputs.auto_switch == true }}
-        shell: powershell
+          "RUSTDESK_ID=$RustDeskID" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append -Encoding utf8
+
+          Write-Host "RustDesk installed."
+          Write-Host "RustDesk ID: $RustDeskID"
+
+      # 7. Đặt wallpaper cho profile Layer7
+      - name: Setup Layer7 Wallpaper
+        shell: pwsh
         run: |
-          $Session = (Get-Process -Id $PID).SessionId
+          $ErrorActionPreference = "Stop"
 
-          $Action = New-ScheduledTaskAction `
-            -Execute "cmd.exe" `
-            -Argument "/c tscon $Session /dest:console"
+          $WallpaperScript = Join-Path `
+            $env:GITHUB_WORKSPACE "scripts\set-wallpaper.ps1"
 
-          $Trigger = New-ScheduledTaskTrigger `
-            -Once -At (Get-Date).AddSeconds(20)
-
-          $Principal = New-ScheduledTaskPrincipal `
-            -UserId "SYSTEM" `
-            -LogonType ServiceAccount `
-            -RunLevel Highest
-
-          Register-ScheduledTask `
-            -TaskName "Layer7ConsoleSwitch" `
-            -Action $Action `
-            -Trigger $Trigger `
-            -Principal $Principal `
-            -Force
-
-          Write-Host "Console switch scheduled."
-
-      # 8. Publish information
-      - name: Publish Connection Details
-        shell: powershell
-        run: |
-          $Summary = $env:GITHUB_STEP_SUMMARY
-
-          Add-Content $Summary "## Layer7 Cloud PC"
-          Add-Content $Summary ""
-          Add-Content $Summary "- OS: Windows Server 2025"
-          Add-Content $Summary "- User: Layer7"
-          Add-Content $Summary "- RDP: Enabled"
-
-          if ($env:RUSTDESK_ID) {
-              Add-Content $Summary ""
-              Add-Content $Summary "### RustDesk"
-              Add-Content $Summary "- ID: $env:RUSTDESK_ID"
+          if (-not (Test-Path $WallpaperScript)) {
+              throw "Không tìm thấy scripts/set-wallpaper.ps1."
           }
 
-      # 9. Keep alive
-      - name: Keep Session Alive
-        shell: powershell
+          & $WallpaperScript
+
+      # 8. Kiểm tra RustDesk và xuất thông tin kết nối
+      - name: Verify Connection
+        shell: pwsh
+        env:
+          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
         run: |
-          while ($true) {
-              Write-Host "[$(Get-Date)] Layer7 Cloud PC running..."
-              Start-Sleep -Seconds 300
+          $ErrorActionPreference = "Stop"
+
+          $Service = Get-Service -Name "RustDesk" -ErrorAction Stop
+
+          if ($Service.Status -ne "Running") {
+              Start-Service -Name "RustDesk"
           }
+
+          if ([string]::IsNullOrWhiteSpace($env:RUSTDESK_ID)) {
+              throw "RustDesk ID không tồn tại."
+          }
+
+          Write-Host "========================================"
+          Write-Host "       LAYER7 CONNECTION INFORMATION"
+          Write-Host "========================================"
+          Write-Host "RustDesk ID: $env:RUSTDESK_ID"
+          Write-Host "Password: Stored in GitHub Secret RUSTDESK_PASSWORD"
+          Write-Host "Service: Running"
+
+          @"
+          ## Layer7 Cloud PC
+
+          - Windows: Windows Server 2025 runner
+          - RustDesk ID: $env:RUSTDESK_ID
+          - RustDesk Service: Running
+          - Password: GitHub Secret `RUSTDESK_PASSWORD`
+          - Keep-alive target: 6 hours
+          "@ | Out-File `
+            -FilePath $env:GITHUB_STEP_SUMMARY `
+            -Append -Encoding utf8
+
+      # 9. Duy trì máy trong thời gian còn lại
+      - name: Keep Layer7 Cloud PC Alive
+        shell: pwsh
+        timeout-minutes: 350
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          $RustDeskPath = "$env:ProgramFiles\RustDesk\rustdesk.exe"
+
+          if (-not (Test-Path $RustDeskPath)) {
+              $RustDeskPath = "${env:ProgramFiles(x86)}\RustDesk\rustdesk.exe"
+          }
+
+          $EndTime = (Get-Date).AddMinutes(350)
+
+          Write-Host "========================================"
+          Write-Host "       LAYER7 KEEP ALIVE"
+          Write-Host "       Target: 350 minutes"
+          Write-Host "========================================"
+
+          while ((Get-Date) -lt $EndTime) {
+              try {
+                  $Service = Get-Service `
+                    -Name "RustDesk" `
+                    -ErrorAction SilentlyContinue
+
+                  if ($Service) {
+                      $Service.Refresh()
+
+                      if ($Service.Status -ne "Running") {
+                          Write-Warning "RustDesk stopped. Restarting..."
+                          Start-Service -Name "RustDesk"
+                      }
+                  }
+                  else {
+                      Write-Warning "RustDesk service not found."
+                  }
+
+                  $Remaining = [math]::Max(
+                      0,
+                      [int](($EndTime - (Get-Date)).TotalMinutes)
+                  )
+
+                  Write-Host "========================================"
+                  Write-Host "Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                  Write-Host "RustDesk ID: $env:RUSTDESK_ID"
+                  Write-Host "Remaining: $Remaining minutes"
+                  Write-Host "========================================"
+              }
+              catch {
+                  Write-Warning $_.Exception.Message
+              }
+
+              Start-Sleep -Seconds 30
+          }
+
+          Write-Host "Layer7 keep-alive period completed."
+
+      # 10. Hoàn tất
+      - name: Workflow Completed
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "Layer7 Cloud PC workflow finished."
+          Write-Host "Job status: ${{ job.status }}"
