@@ -151,119 +151,123 @@ jobs:
           Write-Host "Remote Desktop configured."
 
       # 6. Cài đặt RustDesk
-      - name: Install RustDesk
-        shell: pwsh
+      
+      - name: Install RustDesk & Get ID
+        shell: powershell
         env:
-          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
+          RDP_PASS: ${{ secrets.RUSTDESK_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          if ([string]::IsNullOrWhiteSpace($env:RUSTDESK_PASSWORD)) {
-              throw "Thiếu GitHub Secret RUSTDESK_PASSWORD."
+          Write-Host "========================================"
+          Write-Host "       LAYER7 RUSTDESK INSTALL"
+          Write-Host "========================================"
+
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASS)) {
+              throw "Missing GitHub Secret RUSTDESK_PASSWORD."
           }
 
-          $DownloadDirectory = "$env:RUNNER_TEMP\Layer7"
-          New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
+          # Download MSI
+          Write-Host "Downloading RustDesk..."
 
-          Write-Host "Getting latest RustDesk release..."
+          $msiPath = "$env:RUNNER_TEMP\rustdesk.msi"
 
-          $Release = Invoke-RestMethod `
-            -Uri "https://api.github.com/repos/rustdesk/rustdesk/releases/latest" `
-            -Headers @{ "User-Agent" = "Layer7-Cloud-PC" }
+          curl.exe -L --fail `
+            -o $msiPath `
+            "https://github.com/rustdesk/rustdesk/releases/download/1.2.6/rustdesk-1.2.6-x86_64.msi"
 
-          $Asset = $Release.assets |
-            Where-Object {
-              $_.name -match 'x86_64\.exe$'
-            } |
-            Select-Object -First 1
-
-          if (-not $Asset) {
-              throw "Không tìm thấy bộ cài RustDesk Windows x86_64."
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $msiPath)) {
+              throw "RustDesk MSI download failed."
           }
 
-          $Installer = Join-Path $DownloadDirectory "rustdesk-installer.exe"
-
-          Invoke-WebRequest `
-            -Uri $Asset.browser_download_url `
-            -OutFile $Installer
-
-          if (-not (Test-Path $Installer)) {
-              throw "Tải RustDesk thất bại."
-          }
-
+          # Install MSI
           Write-Host "Installing RustDesk..."
 
-          $InstallProcess = Start-Process `
-            -FilePath $Installer `
-            -ArgumentList "--silent-install" `
+          $install = Start-Process `
+            -FilePath "msiexec.exe" `
+            -ArgumentList "/i `"$msiPath`" /qn /norestart" `
             -Wait `
             -PassThru
 
-          if ($InstallProcess.ExitCode -ne 0) {
-              throw "RustDesk installer returned exit code $($InstallProcess.ExitCode)."
+          if ($install.ExitCode -notin @(0, 3010)) {
+              throw "RustDesk installation failed. Exit code: $($install.ExitCode)"
           }
 
-          Start-Sleep -Seconds 20
+          Start-Sleep -Seconds 15
 
-          $RustDeskPath = "$env:ProgramFiles\RustDesk\rustdesk.exe"
+          # Locate executable
+          $rustdeskExe = "C:\Program Files\RustDesk\rustdesk.exe"
 
-          if (-not (Test-Path $RustDeskPath)) {
-              $RustDeskPath = "${env:ProgramFiles(x86)}\RustDesk\rustdesk.exe"
+          if (-not (Test-Path $rustdeskExe)) {
+              $rustdeskExe = "${env:ProgramFiles(x86)}\RustDesk\rustdesk.exe"
           }
 
-          if (-not (Test-Path $RustDeskPath)) {
-              throw "Không tìm thấy rustdesk.exe sau khi cài đặt."
+          if (-not (Test-Path $rustdeskExe)) {
+              throw "Cannot find RustDesk executable."
           }
 
-          # Cài đặt Windows Service
-          Start-Process `
-            -FilePath $RustDeskPath `
-            -ArgumentList "--install-service" `
-            -Wait
+          # Install service
+          Write-Host "Installing RustDesk service..."
+
+          & $rustdeskExe --install-service
 
           Start-Sleep -Seconds 10
 
-          $Service = Get-Service -Name "RustDesk" -ErrorAction SilentlyContinue
+          $service = Get-Service -Name "RustDesk" -ErrorAction SilentlyContinue
 
-          if (-not $Service) {
-              throw "Không tìm thấy dịch vụ RustDesk."
+          if ($service) {
+              if ($service.Status -ne "Running") {
+                  Start-Service -Name "RustDesk"
+              }
+          }
+          else {
+              Write-Warning "RustDesk service was not detected."
           }
 
-          if ($Service.Status -ne "Running") {
-              Start-Service -Name "RustDesk"
+          # Apply password
+          Write-Host "Applying RustDesk password..."
+
+          & $rustdeskExe --password $env:RDP_PASS
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Could not apply RustDesk password."
           }
 
-          # Thiết lập mật khẩu truy cập
-          Start-Process `
-            -FilePath $RustDeskPath `
-            -ArgumentList @("--password", $env:RUSTDESK_PASSWORD) `
-            -Wait
+          Start-Sleep -Seconds 5
 
-          Start-Sleep -Seconds 10
+          # Retrieve ID
+          Write-Host "Retrieving RustDesk ID..."
 
-          # Lấy ID RustDesk
-          $RustDeskID = ""
+          $rustdeskId = $null
+          $attempts = 0
 
-          for ($i = 1; $i -le 12; $i++) {
-              $RustDeskID = (& $RustDeskPath --get-id 2>&1 | Out-String).Trim()
+          while (-not $rustdeskId -and $attempts -lt 10) {
+              $idOutput = & $rustdeskExe --get-id 2>&1 | Out-String
 
-              if ($RustDeskID -match '^[0-9]+$') {
+              if ($idOutput -match '(\d{9,10})') {
+                  $rustdeskId = $matches[1]
                   break
               }
 
+              Write-Host "Retrying ID..."
               Start-Sleep -Seconds 5
+              $attempts++
           }
 
-          if ($RustDeskID -notmatch '^[0-9]+$') {
-              throw "Không lấy được RustDesk ID."
+          if ($rustdeskId) {
+              "RUSTDESK_ID=$rustdeskId" | Out-File `
+                -FilePath $env:GITHUB_ENV `
+                -Append `
+                -Encoding utf8
+
+              Write-Host "RustDesk ID: $rustdeskId"
+          }
+          else {
+              Write-Warning "Could not get RustDesk ID. Check network connectivity."
           }
 
-          "RUSTDESK_ID=$RustDeskID" | Out-File `
-            -FilePath $env:GITHUB_ENV `
-            -Append -Encoding utf8
+          Write-Host "RustDesk installation step completed."
 
-          Write-Host "RustDesk installed."
-          Write-Host "RustDesk ID: $RustDeskID"
 
       # 7. Đặt wallpaper cho profile Layer7
       - name: Setup Layer7 Wallpaper
